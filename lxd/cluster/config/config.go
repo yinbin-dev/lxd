@@ -15,8 +15,10 @@ import (
 
 	"github.com/canonical/lxd/lxd/config"
 	"github.com/canonical/lxd/lxd/db"
+	"github.com/canonical/lxd/lxd/internal/failuredomain"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/features"
 	"github.com/canonical/lxd/shared/validate"
 )
 
@@ -130,6 +132,13 @@ func (c *Config) ImagesMinimalReplica() int64 {
 // assigned the voter role.
 func (c *Config) MaxVoters() int64 {
 	return c.m.GetInt64("cluster.max_voters")
+}
+
+// ExcludedFailureDomains returns the cluster-wide operational list of failure domains currently
+// excluded from placement, or nil if unset (meaning nothing is excluded — every known domain is
+// eligible).
+func (c *Config) ExcludedFailureDomains() []string {
+	return failuredomain.ParseFailureDomains(c.m.GetString("instances.placement.failure_domain.exclude"))
 }
 
 // MaxStandBy returns the maximum number of standby members in a cluster that
@@ -315,21 +324,28 @@ func (c *Config) DumpPublic(trusted bool) map[string]any {
 // Replace the current configuration with the given values.
 //
 // Return what has actually changed.
-func (c *Config) Replace(tx *db.ClusterTx, values map[string]string) (map[string]string, error) {
-	return c.update(tx, values)
+func (c *Config) Replace(ctx context.Context, tx *db.ClusterTx, values map[string]string) (map[string]string, error) {
+	return c.update(ctx, tx, values)
 }
 
 // Patch changes only the configuration keys in the given map.
 //
 // Return what has actually changed.
-func (c *Config) Patch(tx *db.ClusterTx, patch map[string]string) (map[string]string, error) {
+func (c *Config) Patch(ctx context.Context, tx *db.ClusterTx, patch map[string]string) (map[string]string, error) {
 	values := c.Dump() // Use current values as defaults
 	maps.Copy(values, patch)
 
-	return c.update(tx, values)
+	return c.update(ctx, tx, values)
 }
 
-func (c *Config) update(tx *db.ClusterTx, values map[string]string) (map[string]string, error) {
+func (c *Config) update(ctx context.Context, tx *db.ClusterTx, values map[string]string) (map[string]string, error) {
+	// Validated up front, before touching c.m, so a rejected value never gets applied to the
+	// in-memory config even transiently.
+	err := validateExcludedFailureDomains(ctx, tx, values)
+	if err != nil {
+		return nil, err
+	}
+
 	changed, err := c.m.Change(values)
 	if err != nil {
 		return nil, err
@@ -341,6 +357,31 @@ func (c *Config) update(tx *db.ClusterTx, values map[string]string) (map[string]
 	}
 
 	return changed, nil
+}
+
+// validateExcludedFailureDomains validates values["instances.placement.failure_domain.exclude"]
+// against the cluster's known failure domains, if set.
+func validateExcludedFailureDomains(ctx context.Context, tx *db.ClusterTx, values map[string]string) error {
+	failureDomains, ok := values["instances.placement.failure_domain.exclude"]
+	if !ok {
+		return nil
+	}
+
+	if !features.IsEnabled(features.FailureDomainPlacement) {
+		return errors.New("Unknown key")
+	}
+
+	names, err := tx.GetKnownFailureDomainNames(ctx)
+	if err != nil {
+		return fmt.Errorf("Failed loading known failure domains: %w", err)
+	}
+
+	err = failuredomain.ValidateFailureDomains(names, failuredomain.ParseFailureDomains(failureDomains))
+	if err != nil {
+		return fmt.Errorf("Invalid value for \"instances.placement.failure_domain.exclude\": %w", err)
+	}
+
+	return nil
 }
 
 // ConfigSchema defines available server configuration keys.
@@ -651,6 +692,18 @@ var ConfigSchema = config.Schema{
 		//  defaultdesc: `false`
 		//  shortdesc: Whether to set `migration.stateful` to `true` for the instances
 		"instances.migration.stateful": {Type: config.Bool, Default: "false"},
+
+		// lxdmeta:generate(entities=server; group=miscellaneous; key=instances.placement.failure_domain.exclude)
+		// Comma-separated list of failure domain names to exclude from placement group scheduling.
+		// Unset means nothing is excluded — every known failure domain (one ever assigned to any
+		// cluster member) is eligible. Excluding a domain is the incident-response lever for
+		// keeping all placement groups away from a domain undergoing an outage at once; every name
+		// must already be a known failure domain, or the update is rejected.
+		// ---
+		//  type: string
+		//  scope: global
+		//  shortdesc: Failure domains excluded from placement
+		"instances.placement.failure_domain.exclude": {Type: config.String},
 
 		// TODO: Remove after sunset period
 		// lxdmeta:generate(entities=server; group=miscellaneous; key=user.instances.placement.scriptlet)

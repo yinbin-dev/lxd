@@ -5615,6 +5615,14 @@
 						}
 					},
 					{
+						"instances.placement.failure_domain.exclude": {
+							"longdesc": "Comma-separated list of failure domain names to exclude from placement group scheduling.\nUnset means nothing is excluded — every known failure domain (one ever assigned to any\ncluster member) is eligible. Excluding a domain is the incident-response lever for\nkeeping all placement groups away from a domain undergoing an outage at once; every name\nmust already be a known failure domain, or the update is rejected.",
+							"scope": "global",
+							"shortdesc": "Failure domains excluded from placement",
+							"type": "string"
+						}
+					},
+					{
 						"network.ovn.ca_cert": {
 							"defaultdesc": "Content of `/etc/ovn/ovn-central.crt` if present",
 							"longdesc": "",

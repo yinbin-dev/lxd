@@ -5032,6 +5032,17 @@ If set to `random`, use the random host interface name as the host name.
 If set to `mac`, generate a host name in the form `lxd<mac_address>` (MAC without leading two digits).
 ```
 
+```{config:option} instances.placement.failure_domain.exclude server-miscellaneous
+:scope: "global"
+:shortdesc: "Failure domains excluded from placement"
+:type: "string"
+Comma-separated list of failure domain names to exclude from placement group scheduling.
+Unset means nothing is excluded — every known failure domain (one ever assigned to any
+cluster member) is eligible. Excluding a domain is the incident-response lever for
+keeping all placement groups away from a domain undergoing an outage at once; every name
+must already be a known failure domain, or the update is rejected.
+```
+
 ```{config:option} network.ovn.ca_cert server-miscellaneous
 :defaultdesc: "Content of `/etc/ovn/ovn-central.crt` if present"
 :scope: "global"

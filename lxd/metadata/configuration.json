@@ -4712,6 +4712,13 @@
 						}
 					},
 					{
+						"scope": {
+							"longdesc": "Determines whether `policy`/`rigor` operate on individual cluster members\n(`host`) or on failure domains as a whole (`failure-domain`).\n\nPossible values are `host` and `failure-domain`. Unset defaults to `host`,\nreproducing today's member-level behavior.\nSee {ref}`clustering-instance-placement` for more information.",
+							"shortdesc": "Unit that the placement policy operates on",
+							"type": "string"
+						}
+					},
+					{
 						"user.*": {
 							"longdesc": "User keys can be used in search.",
 							"shortdesc": "Free form user key/value storage",

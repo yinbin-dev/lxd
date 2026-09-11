@@ -4199,6 +4199,17 @@ Possible values are `strict` and `permissive`.
 See {ref}`clustering-instance-placement` for more information.
 ```
 
+```{config:option} scope placement-group-placement-group
+:shortdesc: "Unit that the placement policy operates on"
+:type: "string"
+Determines whether `policy`/`rigor` operate on individual cluster members
+(`host`) or on failure domains as a whole (`failure-domain`).
+
+Possible values are `host` and `failure-domain`. Unset defaults to `host`,
+reproducing today's member-level behavior.
+See {ref}`clustering-instance-placement` for more information.
+```
+
 ```{config:option} user.* placement-group-placement-group
 :shortdesc: "Free form user key/value storage"
 :type: "string"

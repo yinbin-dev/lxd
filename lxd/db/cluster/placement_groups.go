@@ -5,12 +5,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 
 	"github.com/canonical/lxd/lxd/db/query"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/entity"
+	"github.com/canonical/lxd/shared/features"
 )
 
 // PlacementGroupsRow represents a single row of the placement_groups table.
@@ -100,9 +102,14 @@ func GetPlacementGroupsAndURLs(ctx context.Context, tx *sql.Tx, projectName *str
 
 // ToAPI converts the [PlacementGroup] to an [api.PlacementGroup], querying for extra data as necessary.
 func (p *PlacementGroup) ToAPI(configs map[int64]map[string]string) *api.PlacementGroup {
-	config := configs[p.Row.ID]
+	config := maps.Clone(configs[p.Row.ID])
 	if config == nil {
 		config = map[string]string{}
+	}
+
+	// Backward compatibility: "scope" key is new, so default to "host" for existing PGs.
+	if features.IsEnabled(features.FailureDomainPlacement) && config["scope"] == "" {
+		config["scope"] = api.PlacementScopeHost
 	}
 
 	return &api.PlacementGroup{

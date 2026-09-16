@@ -1,4 +1,4 @@
-package filters
+package filters_test
 
 import (
 	"context"
@@ -13,8 +13,17 @@ import (
 	"github.com/canonical/lxd/lxd/db/query"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/placement"
+	"github.com/canonical/lxd/lxd/placement/internal/engine"
+	"github.com/canonical/lxd/lxd/placement/internal/filters"
+	"github.com/canonical/lxd/lxd/placement/internal/models"
 	"github.com/canonical/lxd/shared/api"
 )
+
+func applyPlacementGroupStage(ctx context.Context, tx *db.ClusterTx, apiPlacementGroup *api.PlacementGroup, candidates []db.NodeInfo) ([]db.NodeInfo, error) {
+	pctx := &models.PlacementContext{PlacementGroup: *apiPlacementGroup}
+
+	return engine.New(ctx, tx, pctx, candidates).Apply(filters.FilterByPlacementGroup).Result()
+}
 
 type filteringSuite struct {
 	suite.Suite
@@ -616,7 +625,7 @@ func (s *filteringSuite) TestFilter() {
 				return err
 			}
 
-			got, err := Filter(ctx, tx, tt.args.candidates, *apiPlacementGroup, false)
+			got, err := applyPlacementGroupStage(ctx, tx, apiPlacementGroup, tt.args.candidates)
 			if tt.wantErr {
 				s.Error(err)
 				return nil

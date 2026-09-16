@@ -3,24 +3,34 @@ package filters
 import (
 	"context"
 	"errors"
-	"net/http"
+	"fmt"
 	"slices"
 
 	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/db/cluster"
+	"github.com/canonical/lxd/lxd/placement/internal/models"
 	"github.com/canonical/lxd/shared/api"
 )
 
-// Filter filters the provided slice of candidate cluster members using the provided [api.PlacementGroup].
-func Filter(ctx context.Context, tx *db.ClusterTx, candidates []db.NodeInfo, apiPlacementGroup api.PlacementGroup, evacuation bool) ([]db.NodeInfo, error) {
+// errNoEligiblePlacementGroupCandidate is returned (wrapped) by FilterByPlacementGroup when the
+// group's own policy/rigor leaves no eligible candidates.
+var errNoEligiblePlacementGroupCandidate = errors.New("No eligible candidate cluster member for the placement group")
+
+// FilterByPlacementGroup narrows candidates using pctx.PlacementGroup. It's a no-op when
+// pctx.PlacementGroup is unset.
+func FilterByPlacementGroup(ctx context.Context, tx *db.ClusterTx, pctx *models.PlacementContext, candidates []db.NodeInfo) ([]db.NodeInfo, error) {
+	apiPlacementGroup := pctx.PlacementGroup
+	if apiPlacementGroup.Name == "" {
+		return candidates, nil
+	}
+
 	// Get policy and rigor from config.
 	policy := apiPlacementGroup.Config["policy"]
 	rigor := apiPlacementGroup.Config["rigor"]
 
 	// If this is an evacuation request, exclude instances on the source cluster member.
-	// This allows placement decisions to be made based on where instances will be, not where they currently are.
 	var memberID *int64
-	if evacuation {
+	if pctx.Evacuation {
 		sourceMemberID := tx.GetNodeID()
 		memberID = &sourceMemberID
 	}
@@ -33,10 +43,29 @@ func Filter(ctx context.Context, tx *db.ClusterTx, candidates []db.NodeInfo, api
 	// Get compliant cluster members using the placement group.
 	filteredCandidates, err := getCompliantMembers(policy, rigor, candidates, memberToInst)
 	if err != nil {
-		return nil, api.StatusErrorf(http.StatusConflict, "Failed filtering candidate cluster members using placement group %q with %q policy and %q rigor: %w", apiPlacementGroup.Name, policy, rigor, err)
+		return nil, fmt.Errorf("%w: policy %q, rigor %q: %w", errNoEligiblePlacementGroupCandidate, policy, rigor, err)
 	}
 
 	return filteredCandidates, nil
+}
+
+// FilterByClusterGroup narrows candidates to members of pctx.ClusterGroupName. It's a no-op
+// unless pctx.ClusterGroupName is set and pctx.PlacementGroup isn't.
+func FilterByClusterGroup(ctx context.Context, tx *db.ClusterTx, pctx *models.PlacementContext, candidates []db.NodeInfo) ([]db.NodeInfo, error) {
+	if pctx.ClusterGroupName == "" || pctx.PlacementGroup.Name != "" {
+		return candidates, nil
+	}
+
+	filtered := make([]db.NodeInfo, 0, len(candidates))
+	for _, member := range candidates {
+		if !slices.Contains(member.Groups, pctx.ClusterGroupName) {
+			continue
+		}
+
+		filtered = append(filtered, member)
+	}
+
+	return filtered, nil
 }
 
 // getCompliantMembers gets compliant cluster members from the provided candidates based on the given placement policy and rigor.

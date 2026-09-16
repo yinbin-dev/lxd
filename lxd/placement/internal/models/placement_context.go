@@ -13,4 +13,7 @@ type PlacementContext struct {
 	// Consulted by FilterByPlacementGroup.
 	PlacementGroup api.PlacementGroup
 	Evacuation     bool
+
+	// Consulted by FilterByClusterGroup.
+	ClusterGroupName string
 }

@@ -28,3 +28,16 @@ func Filter[T any](seq iter.Seq[T], keep func(T) bool) iter.Seq[T] {
 		}
 	}
 }
+
+// Filter2 returns a sequence containing only the (key, value) pairs of seq for which keep returns
+// true. It's the two-argument counterpart to Filter, for filtering a map via maps.All before
+// rebuilding it with maps.Collect.
+func Filter2[K, V any](seq iter.Seq2[K, V], keep func(K, V) bool) iter.Seq2[K, V] {
+	return func(yield func(K, V) bool) {
+		for k, v := range seq {
+			if keep(k, v) && !yield(k, v) {
+				return
+			}
+		}
+	}
+}

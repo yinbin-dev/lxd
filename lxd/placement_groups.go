@@ -20,6 +20,7 @@ import (
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/entity"
+	"github.com/canonical/lxd/shared/features"
 	"github.com/canonical/lxd/shared/validate"
 )
 
@@ -292,6 +293,8 @@ func placementGroupsPost(d *Daemon, r *http.Request) response.Response {
 	if err != nil {
 		return response.BadRequest(err)
 	}
+
+	req.Config = placementGroupDefaultConfig(req.Config)
 
 	projectName := request.ProjectParam(r)
 	newGroup := cluster.PlacementGroupsRow{
@@ -628,6 +631,8 @@ func placementGroupPut(d *Daemon, r *http.Request) response.Response {
 		}
 	}
 
+	updatedConfig = placementGroupDefaultConfig(updatedConfig)
+
 	err = placementGroupValidateConfig(updatedConfig)
 	if err != nil {
 		return response.SmartError(err)
@@ -725,6 +730,19 @@ func placementGroupPost(d *Daemon, r *http.Request) response.Response {
 	return response.SyncResponseLocation(true, nil, entity.PlacementGroupURL(projectName, placementGroupName).String())
 }
 
+// placementGroupDefaultConfig normalizes the scope config key.
+func placementGroupDefaultConfig(config map[string]string) map[string]string {
+	if config == nil {
+		config = map[string]string{}
+	}
+
+	if features.IsEnabled(features.FailureDomainPlacement) && config["scope"] == "" {
+		config["scope"] = api.PlacementScopeHost
+	}
+
+	return config
+}
+
 // placementGroupValidateConfig validates the configuration keys/values for placement groups.
 func placementGroupValidateConfig(config map[string]string) error {
 	placementGroupConfigKeys := map[string]func(value string) error{
@@ -750,6 +768,21 @@ func placementGroupValidateConfig(config map[string]string) error {
 		//  required: "yes"
 		//  shortdesc: Enforcement level of the placement policy
 		"rigor": validate.IsOneOf(api.PlacementRigorStrict, api.PlacementRigorPermissive),
+	}
+
+	// scope is rejected below as an unknown key while the feature preview is off.
+	if features.IsEnabled(features.FailureDomainPlacement) {
+		// lxdmeta:generate(entities=placement-group; group=placement-group; key=scope)
+		// Determines whether `policy`/`rigor` operate on individual cluster members
+		// (`host`) or on failure domains as a whole (`failure-domain`).
+		//
+		// Possible values are `host` and `failure-domain`. Unset defaults to `host`,
+		// reproducing today's member-level behavior.
+		// See {ref}`clustering-instance-placement` for more information.
+		// ---
+		//  type: string
+		//  shortdesc: Unit that the placement policy operates on
+		placementGroupConfigKeys["scope"] = validate.IsOneOf(api.PlacementScopeHost, api.PlacementScopeFailureDomain)
 	}
 
 	for k, v := range config {

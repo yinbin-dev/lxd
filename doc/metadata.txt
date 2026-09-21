@@ -4199,6 +4199,17 @@ Possible values are `strict` and `permissive`.
 See {ref}`clustering-instance-placement` for more information.
 ```
 
+```{config:option} scope placement-group-placement-group
+:shortdesc: "Unit that the placement policy operates on"
+:type: "string"
+Determines whether `policy`/`rigor` operate on individual cluster members
+(`host`) or on failure domains as a whole (`failure-domain`).
+
+Possible values are `host` and `failure-domain`. Unset defaults to `host`,
+reproducing today's member-level behavior.
+See {ref}`clustering-instance-placement` for more information.
+```
+
 ```{config:option} user.* placement-group-placement-group
 :shortdesc: "Free form user key/value storage"
 :type: "string"
@@ -5030,6 +5041,17 @@ Possible values are `random` and `mac`.
 
 If set to `random`, use the random host interface name as the host name.
 If set to `mac`, generate a host name in the form `lxd<mac_address>` (MAC without leading two digits).
+```
+
+```{config:option} instances.placement.failure_domain.exclude server-miscellaneous
+:scope: "global"
+:shortdesc: "Failure domains excluded from placement"
+:type: "string"
+Comma-separated list of failure domain names to exclude from placement group scheduling.
+Unset means nothing is excluded — every known failure domain (one ever assigned to any
+cluster member) is eligible. Excluding a domain is the incident-response lever for
+keeping all placement groups away from a domain undergoing an outage at once; every name
+must already be a known failure domain, or the update is rejected.
 ```
 
 ```{config:option} network.ovn.ca_cert server-miscellaneous

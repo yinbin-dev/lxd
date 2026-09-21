@@ -4712,6 +4712,13 @@
 						}
 					},
 					{
+						"scope": {
+							"longdesc": "Determines whether `policy`/`rigor` operate on individual cluster members\n(`host`) or on failure domains as a whole (`failure-domain`).\n\nPossible values are `host` and `failure-domain`. Unset defaults to `host`,\nreproducing today's member-level behavior.\nSee {ref}`clustering-instance-placement` for more information.",
+							"shortdesc": "Unit that the placement policy operates on",
+							"type": "string"
+						}
+					},
+					{
 						"user.*": {
 							"longdesc": "User keys can be used in search.",
 							"shortdesc": "Free form user key/value storage",
@@ -5611,6 +5618,14 @@
 							"longdesc": "Possible values are `random` and `mac`.\n\nIf set to `random`, use the random host interface name as the host name.\nIf set to `mac`, generate a host name in the form `lxd\u003cmac_address\u003e` (MAC without leading two digits).",
 							"scope": "global",
 							"shortdesc": "How to set the host name for a NIC",
+							"type": "string"
+						}
+					},
+					{
+						"instances.placement.failure_domain.exclude": {
+							"longdesc": "Comma-separated list of failure domain names to exclude from placement group scheduling.\nUnset means nothing is excluded — every known failure domain (one ever assigned to any\ncluster member) is eligible. Excluding a domain is the incident-response lever for\nkeeping all placement groups away from a domain undergoing an outage at once; every name\nmust already be a known failure domain, or the update is rejected.",
+							"scope": "global",
+							"shortdesc": "Failure domains excluded from placement",
 							"type": "string"
 						}
 					},

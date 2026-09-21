@@ -112,7 +112,7 @@ func TestConfigLoad_OfflineThresholdValidator(t *testing.T) {
 	config, err := clusterConfig.Load(context.Background(), tx)
 	require.NoError(t, err)
 
-	_, err = config.Patch(tx, map[string]string{"cluster.offline_threshold": "2"})
+	_, err = config.Patch(context.Background(), tx, map[string]string{"cluster.offline_threshold": "2"})
 	require.EqualError(t, err, `Cannot set "cluster.offline_threshold" to "2": Value must be greater than 10`)
 }
 
@@ -124,8 +124,51 @@ func TestConfigLoad_MaxVotersValidator(t *testing.T) {
 	config, err := clusterConfig.Load(context.Background(), tx)
 	require.NoError(t, err)
 
-	_, err = config.Patch(tx, map[string]string{"cluster.max_voters": "4"})
+	_, err = config.Patch(context.Background(), tx, map[string]string{"cluster.max_voters": "4"})
 	require.EqualError(t, err, `Cannot set "cluster.max_voters" to "4": Value must be an odd number equal to or higher than 3`)
+}
+
+// TestConfigLoad_FailureDomainsValidator asserts unknown names are rejected and known names are
+// accepted.
+func TestConfigLoad_FailureDomainsValidator(t *testing.T) {
+	tx, cleanup := db.NewTestClusterTx(t)
+	defer cleanup()
+
+	config, err := clusterConfig.Load(context.Background(), tx)
+	require.NoError(t, err)
+
+	_, err = config.Patch(context.Background(), tx, map[string]string{"instances.placement.failure_domain.exclude": "az1"})
+	require.EqualError(t, err, `Invalid value for "instances.placement.failure_domain.exclude": ["az1"] are not known failure domains`)
+
+	id, err := tx.CreateNode("buzz", "1.2.3.4:666")
+	require.NoError(t, err)
+	require.NoError(t, tx.UpdateNodeFailureDomain(context.Background(), id, "az1"))
+
+	changed, err := config.Patch(context.Background(), tx, map[string]string{"instances.placement.failure_domain.exclude": "az1"})
+	require.NoError(t, err)
+	assert.Equal(t, "az1", changed["instances.placement.failure_domain.exclude"])
+	assert.Equal(t, []string{"az1"}, config.ExcludedFailureDomains())
+}
+
+// TestConfigLoad_FailureDomainsFeatureGate confirms instances.placement.failure_domain.exclude is
+// rejected outright while FailureDomainPlacement is disabled.
+func TestConfigLoad_FailureDomainsFeatureGate(t *testing.T) {
+	// Re-syncs the cached feature snapshot after t.Setenv restores the environment.
+	t.Cleanup(func() {
+		require.NoError(t, features.LoadFromEnv(features.EnvVar))
+	})
+
+	t.Setenv(features.EnvVar, "")
+	require.NoError(t, features.LoadFromEnv(features.EnvVar))
+
+	tx, cleanup := db.NewTestClusterTx(t)
+	defer cleanup()
+
+	config, err := clusterConfig.Load(context.Background(), tx)
+	require.NoError(t, err)
+
+	_, err = config.Patch(context.Background(), tx, map[string]string{"instances.placement.failure_domain.exclude": "az1"})
+	require.EqualError(t, err, "Unknown key")
 }
 
 // If some previously set values are missing from the ones passed to Replace(),
@@ -137,7 +180,7 @@ func TestConfig_ReplaceDeleteValues(t *testing.T) {
 	config, err := clusterConfig.Load(context.Background(), tx)
 	require.NoError(t, err)
 
-	changed, err := config.Replace(tx, map[string]string{"core.proxy_http": "foo.bar"})
+	changed, err := config.Replace(context.Background(), tx, map[string]string{"core.proxy_http": "foo.bar"})
 	assert.NoError(t, err)
 	assert.Equal(t, map[string]string{
 		"core.proxy_http": "foo.bar",
@@ -145,7 +188,7 @@ func TestConfig_ReplaceDeleteValues(t *testing.T) {
 		"volatile.uuid": "",
 	}, changed)
 
-	_, err = config.Replace(tx, map[string]string{})
+	_, err = config.Replace(context.Background(), tx, map[string]string{})
 	assert.NoError(t, err)
 
 	assert.Empty(t, config.ProxyHTTP())
@@ -164,10 +207,10 @@ func TestConfig_PatchKeepsValues(t *testing.T) {
 	config, err := clusterConfig.Load(context.Background(), tx)
 	require.NoError(t, err)
 
-	_, err = config.Replace(tx, map[string]string{"core.proxy_http": "foo.bar"})
+	_, err = config.Replace(context.Background(), tx, map[string]string{"core.proxy_http": "foo.bar"})
 	assert.NoError(t, err)
 
-	_, err = config.Patch(tx, map[string]string{})
+	_, err = config.Patch(context.Background(), tx, map[string]string{})
 	assert.NoError(t, err)
 
 	assert.Equal(t, "foo.bar", config.ProxyHTTP())

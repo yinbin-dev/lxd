@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net/http"
 	"slices"
@@ -17,6 +18,7 @@ import (
 	"github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/db/operationtype"
 	"github.com/canonical/lxd/lxd/db/query"
+	"github.com/canonical/lxd/lxd/internal/func/iterutil"
 	"github.com/canonical/lxd/lxd/util"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/osarch"
@@ -864,6 +866,27 @@ func (c *ClusterTx) GetFailureDomainsNames(ctx context.Context) (map[uint64]stri
 	}
 
 	return domains, nil
+}
+
+// GetKnownFailureDomainNames returns the set of every real failure domain name any cluster member
+// currently has assigned. The synthetic "default" domain GetFailureDomainsNames reports for
+// unassigned members (ID 0) is not a real domain — no member with a real failure domain assigned
+// can name it, and it is excluded here accordingly.
+func (c *ClusterTx) GetKnownFailureDomainNames(ctx context.Context) (map[string]struct{}, error) {
+	domains, err := c.GetFailureDomainsNames(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	hasRealID := func(id uint64, _ string) bool { return id != 0 }
+	realDomains := maps.Collect(iterutil.Filter2(maps.All(domains), hasRealID))
+
+	names := make(map[string]struct{}, len(realDomains))
+	for _, name := range realDomains {
+		names[name] = struct{}{}
+	}
+
+	return names, nil
 }
 
 // RemoveNode removes the node with the given id.

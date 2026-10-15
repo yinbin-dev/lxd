@@ -35,6 +35,7 @@ readonly test_group_cluster=(
     "clustering_evacuation_quorum_force"
     "clustering_evacuation_restore_operations"
     "clustering_move"
+    "clustering_instance_create"
     "clustering_remove_members"
     "clustering_autotarget"
     "clustering_upgrade"

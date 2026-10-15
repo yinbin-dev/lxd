@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/db/operationtype"
 	"github.com/canonical/lxd/lxd/events"
 	"github.com/canonical/lxd/lxd/metrics"
@@ -138,6 +139,9 @@ type Operation struct {
 	// Operations which conflict with each other share the same conflict reference.
 	conflictReference string
 
+	// precondition runs in the transaction that registers the operation.
+	precondition func(ctx context.Context, tx *db.ClusterTx) error
+
 	// If this operation is part of a bulk operation, parent will point to the parent operation.
 	parent   *Operation
 	children []*Operation
@@ -250,6 +254,7 @@ func scheduleOperation(s *state.State, args OperationArgs) (*Operation, error) {
 		op.metricsCallback = args.metricsCallback
 		op.logger = logger.AddContext(logger.Ctx{"operation": op.id, "project": op.projectName, "class": op.class.String(), "description": op.description})
 		op.conflictReference = args.ConflictReference
+		op.precondition = args.Precondition
 		op.events = s.Events
 		op.location = s.ServerName
 		op.stage = args.Stage

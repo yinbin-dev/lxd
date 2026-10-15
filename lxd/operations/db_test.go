@@ -1,6 +1,8 @@
 package operations
 
 import (
+	"context"
+	"net/http"
 	"testing"
 	"time"
 
@@ -8,7 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/db/cluster"
+	"github.com/canonical/lxd/lxd/db/operationtype"
+	"github.com/canonical/lxd/lxd/state"
 	"github.com/canonical/lxd/shared/api"
 )
 
@@ -605,4 +610,50 @@ func newTestDBOp(require *require.Assertions) cluster.Operation {
 			StatusCode: int64(api.Running),
 		},
 	}
+}
+
+func (s *dbSuite) Test_registerDBOperationPrecondition() {
+	dbCluster, cleanup := db.NewTestCluster(s.T())
+	defer cleanup()
+
+	st := &state.State{DB: &db.DB{Cluster: dbCluster}}
+
+	countOperations := func() int {
+		var ops []cluster.Operation
+		err := dbCluster.Transaction(context.Background(), func(ctx context.Context, tx *db.ClusterTx) error {
+			var err error
+			ops, err = cluster.GetOperations(ctx, tx.Tx(), false, nil)
+			return err
+		})
+		s.Require().NoError(err)
+
+		return len(ops)
+	}
+
+	// A failing precondition cancels the registration and returns its error.
+	op := newTestOp(s.Require())
+	op.state = st
+	op.dbOpType = operationtype.Wait
+	op.precondition = func(ctx context.Context, tx *db.ClusterTx) error {
+		return api.StatusErrorf(http.StatusNotFound, "Instance creation was cancelled")
+	}
+
+	err := registerDBOperation(context.Background(), op)
+	s.Require().True(api.StatusErrorCheck(err, http.StatusNotFound))
+	s.Require().Equal(0, countOperations())
+
+	// A passing precondition runs in the registration transaction, and the operation is registered.
+	var ran bool
+	op = newTestOp(s.Require())
+	op.state = st
+	op.dbOpType = operationtype.Wait
+	op.precondition = func(ctx context.Context, tx *db.ClusterTx) error {
+		ran = true
+		return nil
+	}
+
+	err = registerDBOperation(context.Background(), op)
+	s.Require().NoError(err)
+	s.Require().True(ran)
+	s.Require().Equal(1, countOperations())
 }

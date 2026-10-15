@@ -128,6 +128,13 @@ func registerDBOperation(ctx context.Context, op *Operation) error {
 			projectIDPtr = &projectID
 		}
 
+		if op.precondition != nil {
+			err := op.precondition(ctx, tx)
+			if err != nil {
+				return err
+			}
+		}
+
 		// Create parent operation record.
 		parentOpID, err := registerSingleOperation(ctx, tx, op, nil, projectIDPtr)
 		if err != nil {

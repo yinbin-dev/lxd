@@ -1,6 +1,7 @@
 package operations
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"slices"
 
+	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/db/operationtype"
 	"github.com/canonical/lxd/lxd/metrics"
 	"github.com/canonical/lxd/lxd/request"
@@ -59,6 +61,10 @@ type OperationArgs struct {
 	// ConflictReference is used to prevent other operations with the same conflict reference from running.
 	// It is not valid to provide a conflict reference if the Type has [operationtype.ConflictActionNone].
 	ConflictReference string
+
+	// Precondition runs in the transaction that registers the operation, before the operation record is written.
+	// An error from it cancels the registration and is returned to the caller. Only a parent operation can have one.
+	Precondition func(ctx context.Context, tx *db.ClusterTx) error
 
 	// Stage defines ordering of child operations. It is not valid to set Stage > 0 on operations that are not children.
 	// Child stages must be consecutive, starting at zero. This is an uint16 to indicate that it is a low positive integer.
@@ -168,6 +174,10 @@ func (a OperationArgs) validate(isChild bool) error {
 
 	if a.ConflictReference != "" && a.Type.ConflictAction() == operationtype.ConflictActionNone {
 		return fmt.Errorf("Conflict reference %q provided for operation type %q that does not support conflicts", a.ConflictReference, a.Type.Description())
+	}
+
+	if isChild && a.Precondition != nil {
+		return errors.New("Child operations cannot have a precondition")
 	}
 
 	if !isChild && a.Stage > 0 {

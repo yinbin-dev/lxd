@@ -675,6 +675,20 @@ func SuitableArchitectures(ctx context.Context, s *state.State, tx *db.ClusterTx
 	return nil, api.StatusErrorf(http.StatusBadRequest, "Unknown instance source type %q", req.Source.Type)
 }
 
+// CheckLocalSupport returns an error if this member cannot run an instance with the type and architecture of args.
+func CheckLocalSupport(s *state.State, args db.InstanceArgs) error {
+	err := s.InstanceTypes[args.Type]
+	if err != nil {
+		return fmt.Errorf("Instance type %q is not supported on this server: %w", args.Type, err)
+	}
+
+	if !slices.Contains(s.OS.Architectures, args.Architecture) {
+		return errors.New("Requested architecture is not supported by this host")
+	}
+
+	return nil
+}
+
 // CreateInternal creates an instance record and storage volume record in the database and sets up devices.
 // Accepts a reverter that revert steps this function does will be added to. It is up to the caller to
 // call the revert's Fail() or Success() function as needed.
@@ -685,10 +699,14 @@ func CreateInternal(ctx context.Context, s *state.State, args db.InstanceArgs, c
 	revert := revert.New()
 	defer revert.Fail()
 
-	// Check instance type requested is supported by this machine.
-	err := s.InstanceTypes[args.Type]
+	if args.Architecture == 0 {
+		args.Architecture = s.OS.Architectures[0]
+	}
+
+	// Check that this member can run the instance before anything is written.
+	err := CheckLocalSupport(s, args)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("Instance type %q is not supported on this server: %w", args.Type, err)
+		return nil, nil, nil, err
 	}
 
 	// Set default values.
@@ -725,10 +743,6 @@ func CreateInternal(ctx context.Context, s *state.State, args db.InstanceArgs, c
 		args.Devices = deviceConfig.Devices{}
 	}
 
-	if args.Architecture == 0 {
-		args.Architecture = s.OS.Architectures[0]
-	}
-
 	err = instancetype.ValidName(args.Name, args.Snapshot)
 	if err != nil {
 		return nil, nil, nil, err
@@ -761,10 +775,6 @@ func CreateInternal(ctx context.Context, s *state.State, args db.InstanceArgs, c
 	_, err = osarch.ArchitectureName(args.Architecture)
 	if err != nil {
 		return nil, nil, nil, err
-	}
-
-	if !slices.Contains(s.OS.Architectures, args.Architecture) {
-		return nil, nil, nil, errors.New("Requested architecture is not supported by this host")
 	}
 
 	var profiles []string

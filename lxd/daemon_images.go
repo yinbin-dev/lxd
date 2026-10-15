@@ -44,6 +44,15 @@ type ImageDownloadArgs struct {
 	Budget            int64
 	SourceProjectName string
 	UserRequested     bool
+
+	// Fingerprint is the full fingerprint of the registry image that the caller already resolved from Alias.
+	// When it is set, ImageDownload does not resolve the alias. A cached copy of the alias still comes first.
+	Fingerprint string
+
+	// Image is the metadata of the registry image that the caller already read. When it is set together with
+	// Fingerprint, ImageDownload does not read the metadata again. The caller sets it for a private image, so that
+	// the secret is used only for the image file.
+	Image *api.Image
 }
 
 // imageOperationLock acquires a lock for operating on an image and returns the unlock function.
@@ -97,8 +106,34 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 			return nil, err
 		}
 
-		// For public images, resolve aliases and fetch initial metadata from the remote server.
-		if args.Secret == "" {
+		// A pinned fingerprint replaces the alias for the reads from the registry.
+		if args.Fingerprint != "" {
+			fp = args.Fingerprint
+		}
+
+		if args.Fingerprint != "" && args.Image != nil {
+			// The caller already read the image metadata.
+			if args.Image.Fingerprint != args.Fingerprint {
+				return nil, fmt.Errorf("Image metadata fingerprint %q does not match %q", args.Image.Fingerprint, args.Fingerprint)
+			}
+
+			info = args.Image
+			fp = info.Fingerprint
+			sourceAliases = info.Aliases
+			if args.Secret != "" {
+				alias = info.Fingerprint
+			}
+		} else if args.Fingerprint != "" && args.Secret == "" {
+			// The caller already resolved the alias. Fetch the metadata of the pinned image.
+			info, _, err = remote.GetImage(fp)
+			if err != nil {
+				return nil, fmt.Errorf("Failed getting remote image info: %w", err)
+			}
+
+			fp = info.Fingerprint
+			sourceAliases = info.Aliases
+		} else if args.Secret == "" {
+			// For public images, resolve aliases and fetch initial metadata from the remote server.
 			// Look for a matching alias on the remote server.
 			entry, _, err := remote.GetImageAliasType(args.Type, fp)
 			if err == nil {

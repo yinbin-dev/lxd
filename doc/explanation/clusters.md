@@ -265,6 +265,32 @@ However, you can control this behavior with the {config:option}`cluster-cluster:
    - The instance is targeted to live on this cluster member.
    - The instance is targeted to live on a member of a cluster group that the cluster member is a part of, and the cluster member has the lowest number of instances compared to the other members of the cluster group.
 
+(clustering-instance-creation)=
+### Creation of an instance on its cluster member
+
+When you create an instance from an image, or an empty instance, the cluster member that receives the request does these steps in one database transaction:
+
+- It selects the target cluster member.
+- It checks the project limits and the name of the instance.
+- It records the instance on the target cluster member.
+
+Thus, concurrent requests cannot go above the project limits or break a placement group with `rigor=strict`.
+A name that is already in use fails before LXD downloads the image.
+
+The target cluster member then takes over the instance.
+It downloads the image and creates the storage of the instance.
+The operation that the client gets runs on the target cluster member.
+If a step fails on the target cluster member, LXD removes the instance.
+
+In some conditions, the cluster member that receives the request cannot tell if the target cluster member took over the instance:
+
+- If the request to the target cluster member times out, LXD keeps the instance, and returns an error that names the instance and the target cluster member.
+- If the cluster member that receives the request stops before the target cluster member takes over, the instance also stays.
+
+Examine the instance with `lxc info <instance_name>`.
+If the instance has no storage, delete it with `lxc delete <instance_name>`.
+Until you delete it, the instance keeps its name and counts for the project limits.
+
 (exp-clusters-placement)=
 ### Placement groups
 

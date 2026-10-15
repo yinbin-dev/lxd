@@ -758,6 +758,26 @@ func PrepareCreate(s *state.State, args db.InstanceArgs) (db.InstanceArgs, error
 	return args, nil
 }
 
+// CreateRecord writes the instance or snapshot row of the prepared args for member node in the caller's transaction,
+// and returns the stored args. A name conflict returns a 409 error.
+func CreateRecord(ctx context.Context, tx *db.ClusterTx, args db.InstanceArgs, node string) (db.InstanceArgs, error) {
+	stored, err := createRecord(ctx, tx, args, node)
+	if err != nil {
+		if api.StatusErrorCheck(err, http.StatusConflict) {
+			thing := "Instance"
+			if shared.IsSnapshot(args.Name) {
+				thing = "Snapshot"
+			}
+
+			return db.InstanceArgs{}, api.StatusErrorf(http.StatusConflict, "%s %q already exists", thing, args.Name)
+		}
+
+		return db.InstanceArgs{}, err
+	}
+
+	return stored, nil
+}
+
 // createRecord validates the profiles of args, writes the instance or snapshot rows, and reads them back.
 func createRecord(ctx context.Context, tx *db.ClusterTx, args db.InstanceArgs, node string) (db.InstanceArgs, error) {
 	var err error
@@ -953,20 +973,17 @@ func CreateInternal(ctx context.Context, s *state.State, args db.InstanceArgs, c
 			return err
 		}
 
-		args, err = createRecord(ctx, tx, args, s.ServerName)
-
-		return err
-	})
-	if err != nil {
-		if api.StatusErrorCheck(err, http.StatusConflict) {
-			thing := "Instance"
-			if shared.IsSnapshot(args.Name) {
-				thing = "Snapshot"
-			}
-
-			return nil, nil, nil, api.StatusErrorf(http.StatusConflict, "%s %q already exists", thing, args.Name)
+		// Keep args for a retry of the transaction until the write succeeds.
+		stored, err := CreateRecord(ctx, tx, args, s.ServerName)
+		if err != nil {
+			return err
 		}
 
+		args = stored
+
+		return nil
+	})
+	if err != nil {
 		return nil, nil, nil, err
 	}
 

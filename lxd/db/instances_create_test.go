@@ -63,3 +63,50 @@ func TestCheckInstanceHandoff(t *testing.T) {
 	err = tx.CheckInstanceHandoff(ctx, localID)
 	require.True(t, api.StatusErrorCheck(err, http.StatusNotFound))
 }
+
+func TestDeleteInstanceIfNotHeld(t *testing.T) {
+	tx, cleanup := db.NewTestClusterTx(t)
+	defer cleanup()
+
+	ctx := context.Background()
+
+	addContainer(t, tx, 1, "free")
+	addContainer(t, tx, 1, "held")
+
+	freeID, err := tx.GetInstanceID(ctx, "default", "free")
+	require.NoError(t, err)
+
+	heldID, err := tx.GetInstanceID(ctx, "default", "held")
+	require.NoError(t, err)
+
+	holdInstance(t, tx, heldID)
+
+	held, err := tx.IsInstanceHeld(ctx, heldID)
+	require.NoError(t, err)
+	require.True(t, held)
+
+	held, err = tx.IsInstanceHeld(ctx, freeID)
+	require.NoError(t, err)
+	require.False(t, held)
+
+	// A row that an operation holds stays.
+	deleted, err := tx.DeleteInstanceIfNotHeld(ctx, heldID)
+	require.NoError(t, err)
+	require.False(t, deleted)
+
+	_, err = tx.GetInstanceID(ctx, "default", "held")
+	require.NoError(t, err)
+
+	// A row that no operation holds goes.
+	deleted, err = tx.DeleteInstanceIfNotHeld(ctx, freeID)
+	require.NoError(t, err)
+	require.True(t, deleted)
+
+	_, err = tx.GetInstanceID(ctx, "default", "free")
+	require.True(t, api.StatusErrorCheck(err, http.StatusNotFound))
+
+	// A missing row deletes nothing.
+	deleted, err = tx.DeleteInstanceIfNotHeld(ctx, freeID)
+	require.NoError(t, err)
+	require.False(t, deleted)
+}

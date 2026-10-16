@@ -975,22 +975,39 @@ func CreateInternal(ctx context.Context, s *state.State, args db.InstanceArgs, c
 			return tx.DeleteInstance(ctx, args.Project, args.Name)
 		})
 	})
-	inst, cleanup, err := Create(ctx, s, args, *p)
+
+	inst, cleanup, err := CreateLocal(ctx, s, args, *p, clearLogDir)
 	if err != nil {
-		logger.Error("Failed initialising instance", logger.Ctx{"project": args.Project, "instance": args.Name, "type": args.Type, "err": err})
-		return nil, nil, nil, fmt.Errorf("Failed initialising instance: %w", err)
+		return nil, nil, nil, err
 	}
 
 	revert.Add(cleanup)
+
+	cleanup = revert.Clone().Fail
+	revert.Success()
+	return inst, op, cleanup, err
+}
+
+// CreateLocal runs the driver Create for the stored args on this member, which validates the devices against the
+// local host. The caller holds the operation lock of the instance.
+func CreateLocal(ctx context.Context, s *state.State, args db.InstanceArgs, p api.Project, clearLogDir bool) (Instance, revert.Hook, error) {
+	err := CheckLocalSupport(s, args)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	inst, cleanup, err := Create(ctx, s, args, p)
+	if err != nil {
+		logger.Error("Failed initialising instance", logger.Ctx{"project": args.Project, "instance": args.Name, "type": args.Type, "err": err})
+		return nil, nil, fmt.Errorf("Failed initialising instance: %w", err)
+	}
 
 	// Wipe any existing log for this instance name.
 	if clearLogDir {
 		_ = os.RemoveAll(inst.LogPath())
 	}
 
-	cleanup = revert.Clone().Fail
-	revert.Success()
-	return inst, op, cleanup, err
+	return inst, cleanup, nil
 }
 
 // NextSnapshotName finds the next snapshot for an instance.

@@ -689,40 +689,10 @@ func CheckLocalSupport(s *state.State, args db.InstanceArgs) error {
 	return nil
 }
 
-// CreateInternal creates an instance record and storage volume record in the database and sets up devices.
-// Accepts a reverter that revert steps this function does will be added to. It is up to the caller to
-// call the revert's Fail() or Success() function as needed.
-// Returns the created instance, along with a "create" operation lock that needs to be marked as Done once the
-// instance is fully completed, and a revert fail function that can be used to undo this function if a subsequent
-// step fails.
-func CreateInternal(ctx context.Context, s *state.State, args db.InstanceArgs, clearLogDir bool) (Instance, *operationlock.InstanceOperation, revert.Hook, error) {
-	revert := revert.New()
-	defer revert.Fail()
-
-	if args.Architecture == 0 {
-		args.Architecture = s.OS.Architectures[0]
-	}
-
-	// Check that this member can run the instance before anything is written.
-	err := CheckLocalSupport(s, args)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	// Set default values.
+// PrepareCreate returns the args of a new instance or snapshot with their defaults set, and validates them without I/O.
+func PrepareCreate(s *state.State, args db.InstanceArgs) (db.InstanceArgs, error) {
 	if args.Project == "" {
 		args.Project = api.ProjectDefaultName
-	}
-
-	if args.Profiles == nil {
-		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-			args.Profiles, err = tx.GetProfiles(ctx, args.Project, []string{"default"})
-
-			return err
-		})
-		if err != nil {
-			return nil, nil, nil, errors.New("Failed getting default profile for new instance")
-		}
 	}
 
 	if args.Config == nil {
@@ -743,9 +713,9 @@ func CreateInternal(ctx context.Context, s *state.State, args db.InstanceArgs, c
 		args.Devices = deviceConfig.Devices{}
 	}
 
-	err = instancetype.ValidName(args.Name, args.Snapshot)
+	err := instancetype.ValidName(args.Name, args.Snapshot)
 	if err != nil {
-		return nil, nil, nil, err
+		return db.InstanceArgs{}, err
 	}
 
 	if !args.Snapshot {
@@ -766,7 +736,7 @@ func CreateInternal(ctx context.Context, s *state.State, args db.InstanceArgs, c
 	// Validate instance config.
 	err = ValidConfig(s.OS, args.Config, false, args.Type)
 	if err != nil {
-		return nil, nil, nil, err
+		return db.InstanceArgs{}, err
 	}
 
 	// Leave validating devices to Create function call below.
@@ -774,7 +744,54 @@ func CreateInternal(ctx context.Context, s *state.State, args db.InstanceArgs, c
 	// Validate architecture.
 	_, err = osarch.ArchitectureName(args.Architecture)
 	if err != nil {
+		return db.InstanceArgs{}, err
+	}
+
+	if args.CreationDate.IsZero() {
+		args.CreationDate = time.Now().UTC()
+	}
+
+	if args.LastUsedDate.IsZero() {
+		args.LastUsedDate = time.Unix(0, 0).UTC()
+	}
+
+	return args, nil
+}
+
+// CreateInternal creates an instance record and storage volume record in the database and sets up devices.
+// Accepts a reverter that revert steps this function does will be added to. It is up to the caller to
+// call the revert's Fail() or Success() function as needed.
+// Returns the created instance, along with a "create" operation lock that needs to be marked as Done once the
+// instance is fully completed, and a revert fail function that can be used to undo this function if a subsequent
+// step fails.
+func CreateInternal(ctx context.Context, s *state.State, args db.InstanceArgs, clearLogDir bool) (Instance, *operationlock.InstanceOperation, revert.Hook, error) {
+	revert := revert.New()
+	defer revert.Fail()
+
+	if args.Architecture == 0 {
+		args.Architecture = s.OS.Architectures[0]
+	}
+
+	// Check that this member can run the instance before anything is written.
+	err := CheckLocalSupport(s, args)
+	if err != nil {
 		return nil, nil, nil, err
+	}
+
+	args, err = PrepareCreate(s, args)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	if args.Profiles == nil {
+		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			args.Profiles, err = tx.GetProfiles(ctx, args.Project, []string{"default"})
+
+			return err
+		})
+		if err != nil {
+			return nil, nil, nil, errors.New("Failed getting default profile for new instance")
+		}
 	}
 
 	var profiles []string
@@ -800,14 +817,6 @@ func CreateInternal(ctx context.Context, s *state.State, args db.InstanceArgs, c
 		}
 
 		checkedProfiles[profile.Name] = true
-	}
-
-	if args.CreationDate.IsZero() {
-		args.CreationDate = time.Now().UTC()
-	}
-
-	if args.LastUsedDate.IsZero() {
-		args.LastUsedDate = time.Unix(0, 0).UTC()
 	}
 
 	// Prevent concurrent create requests for same instance.

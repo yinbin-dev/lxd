@@ -758,6 +758,155 @@ func PrepareCreate(s *state.State, args db.InstanceArgs) (db.InstanceArgs, error
 	return args, nil
 }
 
+// createRecord validates the profiles of args, writes the instance or snapshot rows, and reads them back.
+func createRecord(ctx context.Context, tx *db.ClusterTx, args db.InstanceArgs, node string) (db.InstanceArgs, error) {
+	var err error
+	if args.Profiles == nil {
+		args.Profiles, err = tx.GetProfiles(ctx, args.Project, []string{"default"})
+		if err != nil {
+			return db.InstanceArgs{}, errors.New("Failed getting default profile for new instance")
+		}
+	}
+
+	// Validate profiles.
+	profiles, err := tx.GetProfileNames(ctx, args.Project)
+	if err != nil {
+		return db.InstanceArgs{}, err
+	}
+
+	checkedProfiles := map[string]bool{}
+	for _, profile := range args.Profiles {
+		if !slices.Contains(profiles, profile.Name) {
+			return db.InstanceArgs{}, fmt.Errorf("Requested profile %q does not exist", profile.Name)
+		}
+
+		if checkedProfiles[profile.Name] {
+			return db.InstanceArgs{}, errors.New("Duplicate profile found in request")
+		}
+
+		checkedProfiles[profile.Name] = true
+	}
+
+	var dbInst cluster.Instance
+
+	// Do not store initial.* device config keys in database.
+	initialDevicesConfig := args.Devices.CutInitialConfig()
+	defer func() { initialDevicesConfig.Copy(args.Devices) }() // Restore after DB transaction.
+
+	devices, err := cluster.APIToDevices(args.Devices.CloneNative())
+	if err != nil {
+		return db.InstanceArgs{}, err
+	}
+
+	if args.Snapshot {
+		parts := strings.SplitN(args.Name, shared.SnapshotDelimiter, 2)
+		instanceName := parts[0]
+		snapshotName := parts[1]
+		instance, err := cluster.GetInstance(ctx, tx.Tx(), args.Project, instanceName)
+		if err != nil {
+			return db.InstanceArgs{}, fmt.Errorf("Get instance %q in project %q", instanceName, args.Project)
+		}
+
+		snapshot := cluster.InstanceSnapshot{
+			Project:      args.Project,
+			Instance:     instanceName,
+			Name:         snapshotName,
+			CreationDate: args.CreationDate,
+			Stateful:     args.Stateful,
+			Description:  args.Description,
+			ExpiryDate:   sql.NullTime{Time: args.ExpiryDate, Valid: true},
+		}
+
+		id, err := cluster.CreateInstanceSnapshot(ctx, tx.Tx(), snapshot)
+		if err != nil {
+			return db.InstanceArgs{}, fmt.Errorf("Add snapshot info to the database: %w", err)
+		}
+
+		err = cluster.CreateInstanceSnapshotConfig(ctx, tx.Tx(), id, args.Config)
+		if err != nil {
+			return db.InstanceArgs{}, err
+		}
+
+		err = cluster.CreateInstanceSnapshotDevices(ctx, tx.Tx(), id, devices)
+		if err != nil {
+			return db.InstanceArgs{}, err
+		}
+
+		// Read back the snapshot, to get ID and creation time.
+		s, err := cluster.GetInstanceSnapshot(ctx, tx.Tx(), args.Project, instanceName, snapshotName)
+		if err != nil {
+			return db.InstanceArgs{}, fmt.Errorf("Fetch created snapshot from the database: %w", err)
+		}
+
+		dbInst = s.ToInstance(instance.Name, instance.Node, instance.Type, instance.Architecture)
+	} else {
+		// Create the instance entry.
+		dbInst = cluster.Instance{
+			Project:      args.Project,
+			Name:         args.Name,
+			Node:         node,
+			Type:         args.Type,
+			Snapshot:     args.Snapshot,
+			Architecture: args.Architecture,
+			Ephemeral:    args.Ephemeral,
+			CreationDate: args.CreationDate,
+			Stateful:     args.Stateful,
+			LastUseDate:  sql.NullTime{Time: args.LastUsedDate, Valid: true},
+			Description:  args.Description,
+			ExpiryDate:   sql.NullTime{Time: args.ExpiryDate, Valid: true},
+		}
+
+		instanceID, err := cluster.CreateInstance(ctx, tx.Tx(), dbInst)
+		if err != nil {
+			return db.InstanceArgs{}, fmt.Errorf("Add instance info to the database: %w", err)
+		}
+
+		err = cluster.CreateInstanceDevices(ctx, tx.Tx(), instanceID, devices)
+		if err != nil {
+			return db.InstanceArgs{}, err
+		}
+
+		err = cluster.CreateInstanceConfig(ctx, tx.Tx(), instanceID, args.Config)
+		if err != nil {
+			return db.InstanceArgs{}, err
+		}
+
+		profileNames := make([]string, 0, len(args.Profiles))
+		for _, profile := range args.Profiles {
+			profileNames = append(profileNames, profile.Name)
+		}
+
+		err = cluster.UpdateInstanceProfiles(ctx, tx.Tx(), int(instanceID), dbInst.Project, profileNames)
+		if err != nil {
+			return db.InstanceArgs{}, err
+		}
+
+		// Read back the instance, to get ID and creation time.
+		dbRow, err := cluster.GetInstance(ctx, tx.Tx(), args.Project, args.Name)
+		if err != nil {
+			return db.InstanceArgs{}, fmt.Errorf("Fetch created instance from the database: %w", err)
+		}
+
+		dbInst = *dbRow
+
+		if dbInst.ID < 1 {
+			return db.InstanceArgs{}, fmt.Errorf("Unexpected instance database ID %d: %w", dbInst.ID, err)
+		}
+	}
+
+	newArgs, err := tx.InstancesToInstanceArgs(ctx, false, dbInst)
+	if err != nil {
+		return db.InstanceArgs{}, err
+	}
+
+	// Populate profile info that was already loaded.
+	newInstArgs := newArgs[dbInst.ID]
+	newInstArgs.Profiles = args.Profiles
+	args = newInstArgs
+
+	return args, nil
+}
+
 // CreateInternal creates an instance record and storage volume record in the database and sets up devices.
 // Accepts a reverter that revert steps this function does will be added to. It is up to the caller to
 // call the revert's Fail() or Success() function as needed.
@@ -783,42 +932,6 @@ func CreateInternal(ctx context.Context, s *state.State, args db.InstanceArgs, c
 		return nil, nil, nil, err
 	}
 
-	if args.Profiles == nil {
-		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-			args.Profiles, err = tx.GetProfiles(ctx, args.Project, []string{"default"})
-
-			return err
-		})
-		if err != nil {
-			return nil, nil, nil, errors.New("Failed getting default profile for new instance")
-		}
-	}
-
-	var profiles []string
-
-	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		// Validate profiles.
-		profiles, err = tx.GetProfileNames(ctx, args.Project)
-
-		return err
-	})
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	checkedProfiles := map[string]bool{}
-	for _, profile := range args.Profiles {
-		if !slices.Contains(profiles, profile.Name) {
-			return nil, nil, nil, fmt.Errorf("Requested profile %q does not exist", profile.Name)
-		}
-
-		if checkedProfiles[profile.Name] {
-			return nil, nil, nil, errors.New("Duplicate profile found in request")
-		}
-
-		checkedProfiles[profile.Name] = true
-	}
-
 	// Prevent concurrent create requests for same instance.
 	op, err := operationlock.Create(args.Project, args.Name, operationlock.ActionCreate, false, false)
 	if err != nil {
@@ -827,7 +940,6 @@ func CreateInternal(ctx context.Context, s *state.State, args db.InstanceArgs, c
 
 	revert.Add(func() { op.Done(err) })
 
-	var dbInst cluster.Instance
 	var p *api.Project
 
 	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
@@ -841,134 +953,9 @@ func CreateInternal(ctx context.Context, s *state.State, args db.InstanceArgs, c
 			return err
 		}
 
-		// Do not store initial.* device config keys in database.
-		initialDevicesConfig := args.Devices.CutInitialConfig()
-		defer func() { initialDevicesConfig.Copy(args.Devices) }() // Restore after DB transaction.
+		args, err = createRecord(ctx, tx, args, s.ServerName)
 
-		devices, err := cluster.APIToDevices(args.Devices.CloneNative())
-		if err != nil {
-			return err
-		}
-
-		if args.Snapshot {
-			parts := strings.SplitN(args.Name, shared.SnapshotDelimiter, 2)
-			instanceName := parts[0]
-			snapshotName := parts[1]
-			instance, err := cluster.GetInstance(ctx, tx.Tx(), args.Project, instanceName)
-			if err != nil {
-				return fmt.Errorf("Get instance %q in project %q", instanceName, args.Project)
-			}
-
-			snapshot := cluster.InstanceSnapshot{
-				Project:      args.Project,
-				Instance:     instanceName,
-				Name:         snapshotName,
-				CreationDate: args.CreationDate,
-				Stateful:     args.Stateful,
-				Description:  args.Description,
-				ExpiryDate:   sql.NullTime{Time: args.ExpiryDate, Valid: true},
-			}
-
-			id, err := cluster.CreateInstanceSnapshot(ctx, tx.Tx(), snapshot)
-			if err != nil {
-				return fmt.Errorf("Add snapshot info to the database: %w", err)
-			}
-
-			err = cluster.CreateInstanceSnapshotConfig(ctx, tx.Tx(), id, args.Config)
-			if err != nil {
-				return err
-			}
-
-			err = cluster.CreateInstanceSnapshotDevices(ctx, tx.Tx(), id, devices)
-			if err != nil {
-				return err
-			}
-
-			// Read back the snapshot, to get ID and creation time.
-			s, err := cluster.GetInstanceSnapshot(ctx, tx.Tx(), args.Project, instanceName, snapshotName)
-			if err != nil {
-				return fmt.Errorf("Fetch created snapshot from the database: %w", err)
-			}
-
-			dbInst = s.ToInstance(instance.Name, instance.Node, instance.Type, instance.Architecture)
-
-			newArgs, err := tx.InstancesToInstanceArgs(ctx, false, dbInst)
-			if err != nil {
-				return err
-			}
-
-			// Populate profile info that was already loaded.
-			newInstArgs := newArgs[dbInst.ID]
-			newInstArgs.Profiles = args.Profiles
-			args = newInstArgs
-
-			return nil
-		}
-
-		// Create the instance entry.
-		dbInst = cluster.Instance{
-			Project:      args.Project,
-			Name:         args.Name,
-			Node:         s.ServerName,
-			Type:         args.Type,
-			Snapshot:     args.Snapshot,
-			Architecture: args.Architecture,
-			Ephemeral:    args.Ephemeral,
-			CreationDate: args.CreationDate,
-			Stateful:     args.Stateful,
-			LastUseDate:  sql.NullTime{Time: args.LastUsedDate, Valid: true},
-			Description:  args.Description,
-			ExpiryDate:   sql.NullTime{Time: args.ExpiryDate, Valid: true},
-		}
-
-		instanceID, err := cluster.CreateInstance(ctx, tx.Tx(), dbInst)
-		if err != nil {
-			return fmt.Errorf("Add instance info to the database: %w", err)
-		}
-
-		err = cluster.CreateInstanceDevices(ctx, tx.Tx(), instanceID, devices)
-		if err != nil {
-			return err
-		}
-
-		err = cluster.CreateInstanceConfig(ctx, tx.Tx(), instanceID, args.Config)
-		if err != nil {
-			return err
-		}
-
-		profileNames := make([]string, 0, len(args.Profiles))
-		for _, profile := range args.Profiles {
-			profileNames = append(profileNames, profile.Name)
-		}
-
-		err = cluster.UpdateInstanceProfiles(ctx, tx.Tx(), int(instanceID), dbInst.Project, profileNames)
-		if err != nil {
-			return err
-		}
-
-		// Read back the instance, to get ID and creation time.
-		dbRow, err := cluster.GetInstance(ctx, tx.Tx(), args.Project, args.Name)
-		if err != nil {
-			return fmt.Errorf("Fetch created instance from the database: %w", err)
-		}
-
-		dbInst = *dbRow
-
-		if dbInst.ID < 1 {
-			return fmt.Errorf("Unexpected instance database ID %d: %w", dbInst.ID, err)
-		}
-
-		newArgs, err := tx.InstancesToInstanceArgs(ctx, false, dbInst)
-		if err != nil {
-			return err
-		}
-
-		// Populate profile info that was already loaded.
-		newInstArgs := newArgs[dbInst.ID]
-		newInstArgs.Profiles = args.Profiles
-		args = newInstArgs
-
-		return nil
+		return err
 	})
 	if err != nil {
 		if api.StatusErrorCheck(err, http.StatusConflict) {
@@ -985,7 +972,7 @@ func CreateInternal(ctx context.Context, s *state.State, args db.InstanceArgs, c
 
 	revert.Add(func() {
 		_ = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-			return tx.DeleteInstance(ctx, dbInst.Project, dbInst.Name)
+			return tx.DeleteInstance(ctx, args.Project, args.Name)
 		})
 	})
 	inst, cleanup, err := Create(ctx, s, args, *p)

@@ -248,32 +248,9 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	var reuseFromOtherProject bool
 
 	if err == nil {
-		var nodeAddress string
-
-		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-			// Check if the image is available locally or it's on another node.
-			nodeAddress, err = tx.LocateImage(ctx, imgInfo.Fingerprint)
-
-			return err
-		})
+		err = ensureImageOnLocalMember(ctx, s, args.ProjectName, imgInfo.Fingerprint)
 		if err != nil {
-			return nil, fmt.Errorf("Failed locating image %q in the cluster: %w", imgInfo.Fingerprint, err)
-		}
-
-		if nodeAddress != "" {
-			// The image is available from another node, let's try to import it.
-			err = instanceImageTransfer(ctx, s, args.ProjectName, args.ProjectName, imgInfo.Fingerprint, nodeAddress)
-			if err != nil {
-				return nil, fmt.Errorf("Failed transferring image %q from %q: %w", imgInfo.Fingerprint, nodeAddress, err)
-			}
-
-			err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-				// As the image record already exists in the project, just add the node ID to the image.
-				return tx.AddImageToLocalNode(ctx, args.ProjectName, imgInfo.Fingerprint)
-			})
-			if err != nil {
-				return nil, fmt.Errorf("Failed adding transferred image %q to local cluster member: %w", imgInfo.Fingerprint, err)
-			}
+			return nil, err
 		}
 	} else if !response.IsNotFoundError(err) {
 		return nil, err

@@ -57,6 +57,35 @@ func imageOperationLock(fingerprint string) (locking.UnlockFunc, error) {
 	return locking.Lock(context.TODO(), "ImageOperation_"+fingerprint)
 }
 
+// loadImageRegistry returns the image registry with the given name. It returns a 403 error when the
+// restrictions of the project do not permit the registry.
+func loadImageRegistry(ctx context.Context, tx *db.ClusterTx, projectName string, registryName string) (*api.ImageRegistry, error) {
+	projectConfig, err := cluster.GetProjectConfig(ctx, tx.Tx(), projectName)
+	if err != nil {
+		return nil, fmt.Errorf("Failed loading config for project %q: %w", projectName, err)
+	}
+
+	dbImageRegistry, err := cluster.GetImageRegistry(ctx, tx.Tx(), registryName)
+	if err != nil {
+		if response.IsNotFoundError(err) {
+			return nil, api.StatusErrorf(http.StatusNotFound, "Image registry not found")
+		}
+
+		return nil, fmt.Errorf("Failed fetching image registry %q: %w", registryName, err)
+	}
+
+	config, err := cluster.GetImageRegistryConfig(ctx, tx.Tx(), &dbImageRegistry.ID)
+	if err != nil {
+		return nil, fmt.Errorf("Failed loading image registry config: %w", err)
+	}
+
+	if !project.RegistryAllowed(projectConfig, registryName, dbImageRegistry.Builtin) {
+		return nil, api.StatusErrorf(http.StatusForbidden, "Image registry %q is not allowed in this project", registryName)
+	}
+
+	return dbImageRegistry.ToAPI(config), nil
+}
+
 // ImageDownload resolves the given image alias or fingerprint and if not in the database, downloads it.
 //
 // If args.ImageRegistry is provided, it attempts to fetch the image from the specified remote registry.
@@ -86,31 +115,8 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	if args.ImageRegistry != "" {
 		// Fetch the source image registry details.
 		err = s.DB.Cluster.Transaction(ctx, func(ctx context.Context, tx *db.ClusterTx) error {
-			projectConfig, err := cluster.GetProjectConfig(ctx, tx.Tx(), args.ProjectName)
-			if err != nil {
-				return fmt.Errorf("Failed loading config for project %q: %w", args.ProjectName, err)
-			}
-
-			dbImageRegistry, err := cluster.GetImageRegistry(ctx, tx.Tx(), args.ImageRegistry)
-			if err != nil {
-				if response.IsNotFoundError(err) {
-					return api.StatusErrorf(http.StatusNotFound, "Image registry not found")
-				}
-
-				return fmt.Errorf("Failed fetching image registry %q: %w", args.ImageRegistry, err)
-			}
-
-			config, err := cluster.GetImageRegistryConfig(ctx, tx.Tx(), &dbImageRegistry.ID)
-			if err != nil {
-				return fmt.Errorf("Failed loading image registry config: %w", err)
-			}
-
-			if !project.RegistryAllowed(projectConfig, args.ImageRegistry, dbImageRegistry.Builtin) {
-				return api.StatusErrorf(http.StatusForbidden, "Image registry %q is not allowed in this project", args.ImageRegistry)
-			}
-
-			imageRegistry = dbImageRegistry.ToAPI(config)
-			return nil
+			imageRegistry, err = loadImageRegistry(ctx, tx, args.ProjectName, args.ImageRegistry)
+			return err
 		})
 		if err != nil {
 			return nil, err

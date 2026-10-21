@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/canonical/lxd/lxd/db"
 	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
@@ -95,4 +96,31 @@ func instancesPostSelectClusterMember(ctx context.Context, tx *db.ClusterTx, pla
 
 	// Use filtered candidates to pick the node with least instances.
 	return tx.GetNodeWithLeastInstances(ctx, filteredCandidates)
+}
+
+// selectImageFingerprint returns the fingerprint and the architecture of the registry image in remote that a member
+// with memberArch runs. It prefers the native architecture of the member, then its personalities from the newest
+// to the oldest. It returns an empty fingerprint when remote has no image.
+func selectImageFingerprint(remote instance.RemoteImage, memberArch int) (string, int, error) {
+	if len(remote.Fingerprints) == 0 {
+		return "", 0, nil
+	}
+
+	archs := []int{memberArch}
+	personalities, err := osarch.ArchitecturePersonalities(memberArch)
+	if err == nil {
+		for i := len(personalities) - 1; i >= 0; i-- {
+			archs = append(archs, personalities[i])
+		}
+	}
+
+	for _, arch := range archs {
+		fingerprint, ok := remote.Fingerprints[arch]
+		if ok {
+			return fingerprint, arch, nil
+		}
+	}
+
+	archName, _ := osarch.ArchitectureName(memberArch)
+	return "", 0, api.StatusErrorf(http.StatusBadRequest, "No image for the architecture %q of the selected cluster member", archName)
 }

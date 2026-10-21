@@ -36,41 +36,6 @@ import (
 
 // Helper functions
 
-// instanceCreateAsEmpty creates an empty instance.
-func instanceCreateAsEmpty(ctx context.Context, s *state.State, args db.InstanceArgs, op *operations.Operation) (instance.Instance, error) {
-	revert := revert.New()
-	defer revert.Fail()
-
-	// Create the instance record.
-	inst, instOp, cleanup, err := instance.CreateInternal(ctx, s, args, true)
-	if err != nil {
-		return nil, fmt.Errorf("Failed creating instance record: %w", err)
-	}
-
-	revert.Add(cleanup)
-	defer instOp.Done(err)
-
-	pool, err := storagePools.LoadByInstance(s, inst)
-	if err != nil {
-		return nil, fmt.Errorf("Failed loading instance storage pool: %w", err)
-	}
-
-	err = pool.CreateInstance(inst, nil)
-	if err != nil {
-		return nil, fmt.Errorf("Failed creating instance: %w", err)
-	}
-
-	revert.Add(func() { _ = inst.Delete(context.Background(), true, "", nil) })
-
-	err = inst.UpdateBackupFile()
-	if err != nil {
-		return nil, err
-	}
-
-	revert.Success()
-	return inst, nil
-}
-
 // instanceImageTransfer transfers an image from another cluster node.
 func instanceImageTransfer(ctx context.Context, s *state.State, localProjectName string, remoteProjectName string, hash string, nodeAddress string) error {
 	logger.Debugf("Transferring image %q from node %q", hash, nodeAddress)
@@ -139,82 +104,6 @@ func ensureImageOnLocalMember(ctx context.Context, s *state.State, projectName s
 		return fmt.Errorf("Failed adding transferred image %q to local cluster member: %w", fingerprint, err)
 	}
 
-	return nil
-}
-
-// instanceCreateFromImage creates an instance from a rootfs image.
-func instanceCreateFromImage(ctx context.Context, s *state.State, img *api.Image, args db.InstanceArgs, op *operations.Operation) error {
-	revert := revert.New()
-	defer revert.Fail()
-
-	// Validate the type of the image matches the type of the instance.
-	imgType, err := instancetype.New(img.Type)
-	if err != nil {
-		return err
-	}
-
-	if imgType != args.Type {
-		return fmt.Errorf("Requested image's type %q does not match instance type %q", imgType, args.Type)
-	}
-
-	// Set the "image.*" keys.
-	if img.Properties != nil {
-		for k, v := range img.Properties {
-			args.Config["image."+k] = v
-		}
-	}
-
-	// Set the BaseImage field (regardless of previous value).
-	args.BaseImage = img.Fingerprint
-
-	// Create the instance.
-	inst, instOp, cleanup, err := instance.CreateInternal(ctx, s, args, true)
-	if err != nil {
-		return fmt.Errorf("Failed creating instance record: %w", err)
-	}
-
-	revert.Add(cleanup)
-	defer instOp.Done(nil)
-
-	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		err = tx.UpdateImageLastUseDate(ctx, args.Project, img.Fingerprint, time.Now().UTC())
-		if err != nil {
-			return fmt.Errorf("Error updating image last use date: %w", err)
-		}
-
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	pool, err := storagePools.LoadByInstance(s, inst)
-	if err != nil {
-		return fmt.Errorf("Failed loading instance storage pool: %w", err)
-	}
-
-	// Lock this operation to ensure that concurrent image operations don't conflict.
-	// Other operations will wait for this one to finish.
-	unlock, err := imageOperationLock(img.Fingerprint)
-	if err != nil {
-		return err
-	}
-
-	defer unlock()
-
-	err = pool.CreateInstanceFromImage(ctx, inst, img.Fingerprint, op)
-	if err != nil {
-		return fmt.Errorf("Failed creating instance from image: %w", err)
-	}
-
-	revert.Add(func() { _ = inst.Delete(ctx, true, "", op) })
-
-	err = inst.UpdateBackupFile()
-	if err != nil {
-		return err
-	}
-
-	revert.Success()
 	return nil
 }
 

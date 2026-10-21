@@ -89,14 +89,19 @@ func internalInstanceCreate(d *Daemon, r *http.Request) response.Response {
 		return response.BadRequest(err)
 	}
 
-	return instanceCreateOnTarget(s, r, req)
+	op, err := instanceCreateOnTarget(s, r, req)
+	if err != nil {
+		return response.SmartError(err)
+	}
+
+	return response.OperationResponse(op)
 }
 
 // instanceCreateOnTarget takes the ownership of the instance row of req with the handoff, and returns the operation
-// that completes the creation on this member.
-func instanceCreateOnTarget(s *state.State, r *http.Request, req internalInstanceCreatePost) response.Response {
+// that completes the creation on this member. When it returns an error, the handoff did not occur.
+func instanceCreateOnTarget(s *state.State, r *http.Request, req internalInstanceCreatePost) (*operations.Operation, error) {
 	if s.DB.Cluster.LocalNodeIsEvacuated() {
-		return response.Forbidden(errors.New("Cluster member is evacuated"))
+		return nil, api.StatusErrorf(http.StatusForbidden, "Cluster member is evacuated")
 	}
 
 	var args db.InstanceArgs
@@ -108,25 +113,25 @@ func instanceCreateOnTarget(s *state.State, r *http.Request, req internalInstanc
 	})
 	if err != nil {
 		if api.StatusErrorCheck(err, http.StatusNotFound) {
-			return response.NotFound(errors.New("Instance creation was cancelled"))
+			return nil, api.StatusErrorf(http.StatusNotFound, "Instance creation was cancelled")
 		}
 
-		return response.SmartError(err)
+		return nil, err
 	}
 
 	if args.Project != req.Project || args.Name != req.Name {
-		return response.NotFound(errors.New("Instance creation was cancelled"))
+		return nil, api.StatusErrorf(http.StatusNotFound, "Instance creation was cancelled")
 	}
 
 	err = instance.CheckLocalSupport(s, args)
 	if err != nil {
-		return response.BadRequest(err)
+		return nil, api.StatusErrorf(http.StatusBadRequest, "%w", err)
 	}
 
 	// Prevent concurrent operations on the instance until the creation completes.
 	lock, err := operationlock.Create(args.Project, args.Name, operationlock.ActionCreate, false, false)
 	if err != nil {
-		return response.SmartError(err)
+		return nil, api.StatusErrorf(http.StatusConflict, "%w", err)
 	}
 
 	run := func(ctx context.Context, op *operations.Operation) error {
@@ -158,10 +163,10 @@ func instanceCreateOnTarget(s *state.State, r *http.Request, req internalInstanc
 	op, err := operations.ScheduleUserOperationFromRequest(s, r, opArgs)
 	if err != nil {
 		lock.Done(err)
-		return response.SmartError(err)
+		return nil, err
 	}
 
-	return response.OperationResponse(op)
+	return op, nil
 }
 
 // instanceCreateTargetSteps makes the image available, runs the driver checks, and creates the storage of the

@@ -1707,6 +1707,11 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 	// Set to true once we find that the request is currently handled on a member which isn't hosting the source instance.
 	sourceInstOnDifferentMember := false
 
+	// For an image or a none source, the placement transaction writes the instance row, and the target completes it
+	// with the internal create request.
+	receiverCreates := !clusterNotification && (req.Source.Type == api.SourceTypeImage || req.Source.Type == api.SourceTypeNone)
+	var createReq internalInstanceCreatePost
+
 	target := request.QueryParam(r, "target")
 
 	// Run a first transaction to figure out details about the source and target.
@@ -1965,6 +1970,19 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 			}
 		}
 
+		if receiverCreates {
+			// Record the cluster group as a volatile config key if present.
+			clusterGroup := ""
+			if placementGroupName == "" {
+				clusterGroup = targetGroupName
+			}
+
+			createReq, err = instancesPostCreateRecord(ctx, s, tx, targetProject, &req, profiles, sourceImage, sourceImageRef, imageAuthorizationChecker != nil, remoteImage, targetMemberInfo, clusterGroup)
+			if err != nil {
+				return err
+			}
+		}
+
 		return nil
 	})
 	if err != nil {
@@ -1976,8 +1994,16 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 	if imageAuthorizationChecker != nil {
 		err = imageAuthorizationChecker(r.Context())
 		if err != nil {
+			if receiverCreates {
+				instancesPostDeleteRecord(s, createReq)
+			}
+
 			return response.SmartError(err)
 		}
+	}
+
+	if receiverCreates {
+		return instancesPostSendCreate(r, s, createReq, targetMemberInfo)
 	}
 
 	poolSupportsInternalCopy := false
@@ -2041,10 +2067,9 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 	// Perform the actual copy (including internal copy when clustered).
 
 	switch req.Source.Type {
-	case api.SourceTypeImage:
-		return createFromImage(r, s, *targetProject, profiles, sourceImage, sourceImageRef, &req)
-	case api.SourceTypeNone:
-		return createFromNone(r, s, targetProjectName, profiles, &req)
+	case api.SourceTypeImage, api.SourceTypeNone:
+		// The receiver writes the instance row of these sources, and sends the internal create request.
+		return response.BadRequest(fmt.Errorf("A cluster notification cannot create an instance from a %q source", req.Source.Type))
 	case api.SourceTypeMigration:
 		return createFromMigration(r, s, targetProjectName, profiles, &req, clusterNotification)
 	case api.SourceTypeConversion:

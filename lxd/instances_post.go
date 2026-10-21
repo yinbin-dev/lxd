@@ -49,7 +49,10 @@ import (
 	"github.com/canonical/lxd/shared/version"
 )
 
-func ensureDownloadedImageFitWithinBudget(ctx context.Context, s *state.State, op *operations.Operation, p api.Project, imgAlias string, source api.InstanceSource, imgType string) (*api.Image, error) {
+// ensureDownloadedImageFitWithinBudget downloads the registry image of source into the image project of p, within
+// the image budget of p. A non-empty fingerprint pins the image that the caller resolved, and image is its metadata
+// when the caller read it.
+func ensureDownloadedImageFitWithinBudget(ctx context.Context, s *state.State, op *operations.Operation, p api.Project, imgAlias string, source api.InstanceSource, imgType string, fingerprint string, image *api.Image) (*api.Image, error) {
 	var autoUpdate bool
 	var err error
 	if p.Config["images.auto_update_cached"] != "" {
@@ -87,6 +90,8 @@ func ensureDownloadedImageFitWithinBudget(ctx context.Context, s *state.State, o
 		ProjectName:       imgProject,
 		Budget:            budget,
 		SourceProjectName: source.Project,
+		Fingerprint:       fingerprint,
+		Image:             image,
 	})
 	if err != nil {
 		return nil, err
@@ -120,7 +125,7 @@ func createFromImage(r *http.Request, s *state.State, p api.Project, profiles []
 		}
 
 		if req.Source.ImageRegistry != "" {
-			img, err = ensureDownloadedImageFitWithinBudget(ctx, s, op, p, imgAlias, req.Source, string(req.Type))
+			img, err = ensureDownloadedImageFitWithinBudget(ctx, s, op, p, imgAlias, req.Source, string(req.Type), "", nil)
 			if err != nil {
 				return err
 			}

@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
+	"maps"
 	"net/http"
+	"slices"
 
 	"github.com/canonical/lxd/lxd/db"
 	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
+	deviceConfig "github.com/canonical/lxd/lxd/device/config"
 	"github.com/canonical/lxd/lxd/instance"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/placement"
@@ -123,4 +127,162 @@ func selectImageFingerprint(remote instance.RemoteImage, memberArch int) (string
 
 	archName, _ := osarch.ArchitectureName(memberArch)
 	return "", 0, api.StatusErrorf(http.StatusBadRequest, "No image for the architecture %q of the selected cluster member", archName)
+}
+
+// selectRegistryImage returns the fingerprint to pin and the architecture of the registry image that a member with
+// memberArch runs. With autoUpdate, a cached copy of imageRef for the member has precedence, as in ImageDownload. The
+// fingerprint is then empty, so that the target resolves imageRef to the cached copy.
+func selectRegistryImage(ctx context.Context, tx *db.ClusterTx, source api.InstanceSource, imageRef string, imageType instancetype.Type, remote instance.RemoteImage, memberArch int, autoUpdate bool) (string, int, error) {
+	// A private image and a full fingerprint have no cached copy to prefer.
+	if autoUpdate && source.Secret == "" && !slices.Contains(slices.Collect(maps.Values(remote.Fingerprints)), imageRef) {
+		archs := []int{memberArch}
+		personalities, err := osarch.ArchitecturePersonalities(memberArch)
+		if err == nil {
+			archs = append(archs, personalities...)
+		}
+
+		cachedFingerprint, arch, err := tx.FindCachedImageSourceFingerprint(ctx, source.ImageRegistry, imageRef, imageType.String(), archs)
+		if err != nil {
+			return "", 0, err
+		}
+
+		if cachedFingerprint != "" {
+			return "", arch, nil
+		}
+	}
+
+	fingerprint, arch, err := selectImageFingerprint(remote, memberArch)
+	if err != nil {
+		return "", 0, err
+	}
+
+	if fingerprint == "" {
+		return "", 0, errors.New("Failed resolving the image from its image registry")
+	}
+
+	return fingerprint, arch, nil
+}
+
+// instancesPostCreateRecord writes the instance row of an image or a none source for member target in the caller's
+// transaction, and returns the internal create request that completes the row on that member. A nil target is this
+// member. With imageUnauthorized, the row gets no metadata of the source image, because the caller authorizes the
+// image after the transaction.
+func instancesPostCreateRecord(ctx context.Context, s *state.State, tx *db.ClusterTx, targetProject *api.Project, req *api.InstancesPost, profiles []api.Profile, sourceImage *api.Image, sourceImageRef string, imageUnauthorized bool, remoteImage instance.RemoteImage, target *db.NodeInfo, clusterGroup string) (internalInstanceCreatePost, error) {
+	dbType, err := instancetype.New(string(req.Type))
+	if err != nil {
+		return internalInstanceCreatePost{}, api.StatusErrorf(http.StatusBadRequest, "%w", err)
+	}
+
+	node := s.ServerName
+	memberArch := s.OS.Architectures[0]
+	if target != nil && target.Name != "" && target.Name != s.ServerName {
+		// Placement never selects an evacuated member, but the user can target one.
+		if target.State == db.ClusterMemberStateEvacuated {
+			return internalInstanceCreatePost{}, api.StatusErrorf(http.StatusForbidden, "Cluster member is evacuated")
+		}
+
+		node = target.Name
+		memberArch = target.Architecture
+	}
+
+	args := db.InstanceArgs{
+		Project:     targetProject.Name,
+		Config:      maps.Clone(req.Config),
+		Type:        dbType,
+		Description: req.Description,
+		Devices:     deviceConfig.ApplyDeviceInitialValues(deviceConfig.NewDevices(req.Devices), profiles),
+		Ephemeral:   req.Ephemeral,
+		Name:        req.Name,
+		Profiles:    profiles,
+	}
+
+	if args.Config == nil {
+		args.Config = map[string]string{}
+	}
+
+	if clusterGroup != "" {
+		args.Config["volatile.cluster.group"] = clusterGroup
+	}
+
+	createReq := internalInstanceCreatePost{
+		Project:  targetProject.Name,
+		Name:     req.Name,
+		Source:   req.Source,
+		ImageRef: sourceImageRef,
+		Start:    req.Start,
+	}
+
+	// The architecture of the instance: the image that the member runs, or the member itself.
+	args.Architecture = memberArch
+	if req.Source.Type == api.SourceTypeNone && req.Architecture != "" {
+		args.Architecture, err = osarch.ArchitectureId(req.Architecture)
+		if err != nil {
+			return internalInstanceCreatePost{}, api.StatusErrorf(http.StatusBadRequest, "%w", err)
+		}
+	}
+
+	if req.Source.Type == api.SourceTypeImage {
+		var img *api.Image
+		if req.Source.ImageRegistry != "" {
+			// Pin the registry image that placement selected the member for, unless the member uses a cached copy.
+			autoUpdate := s.GlobalConfig.ImagesAutoUpdateIntervalHours() > 0
+			fingerprint, arch, err := selectRegistryImage(ctx, tx, req.Source, sourceImageRef, dbType, remoteImage, memberArch, autoUpdate)
+			if err != nil {
+				return internalInstanceCreatePost{}, err
+			}
+
+			args.Architecture = arch
+			createReq.Fingerprint = fingerprint
+			img = remoteImage.Images[arch]
+		} else {
+			if sourceImage == nil {
+				return internalInstanceCreatePost{}, api.StatusErrorf(http.StatusBadRequest, "Image not provided for instance creation")
+			}
+
+			img = sourceImage
+			createReq.Fingerprint = sourceImage.Fingerprint
+		}
+
+		// Write the image.* keys and the base image when the metadata of the image is known here and the caller
+		// can see it. Otherwise, the target writes them after the download or the authorization.
+		createReq.Image = img
+		if img != nil && !imageUnauthorized {
+			args.Architecture, err = osarch.ArchitectureId(img.Architecture)
+			if err != nil {
+				return internalInstanceCreatePost{}, err
+			}
+
+			imgType, err := instancetype.New(img.Type)
+			if err != nil {
+				return internalInstanceCreatePost{}, err
+			}
+
+			if imgType != dbType {
+				return internalInstanceCreatePost{}, api.StatusErrorf(http.StatusBadRequest, "Requested image's type %q does not match instance type %q", imgType, dbType)
+			}
+
+			for k, v := range img.Properties {
+				args.Config["image."+k] = v
+			}
+
+			args.BaseImage = img.Fingerprint
+		}
+	}
+
+	args, err = instance.PrepareCreate(s, args)
+	if err != nil {
+		return internalInstanceCreatePost{}, api.StatusErrorf(http.StatusBadRequest, "%w", err)
+	}
+
+	// The instance row does not store the initial.* device keys, so the target gets them from the request.
+	createReq.InitialDevices = args.Devices.Clone().CutInitialConfig()
+
+	stored, err := instance.CreateRecord(ctx, tx, args, node)
+	if err != nil {
+		return internalInstanceCreatePost{}, err
+	}
+
+	createReq.ID = stored.ID
+
+	return createReq, nil
 }

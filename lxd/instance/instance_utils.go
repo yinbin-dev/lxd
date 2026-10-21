@@ -16,7 +16,6 @@ import (
 	"github.com/flosch/pongo2"
 	"github.com/google/uuid"
 
-	"github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/lxd/backup"
 	"github.com/canonical/lxd/lxd/db"
 	"github.com/canonical/lxd/lxd/db/cluster"
@@ -552,10 +551,11 @@ func ResolveImage(ctx context.Context, tx *db.ClusterTx, projectName string, sou
 // SuitableArchitectures returns a slice of architecture ids based on an instance create request.
 //
 // An empty list indicates that the request may be handled by any architecture.
-// A nil list indicates that we can't tell at this stage, typically for private images.
+// A nil list indicates that we can't tell at this stage.
 //
-// If a remote ImageServer is provided, it will be used to query architecture information from an image registry.
-func SuitableArchitectures(ctx context.Context, s *state.State, tx *db.ClusterTx, projectName string, sourceInst *cluster.Instance, sourceImageRef string, req api.InstancesPost, remote lxd.ImageServer) ([]int, error) {
+// For an image from an image registry, it returns the architectures in remote, which ResolveRemoteImage read
+// before the transaction. It does no network I/O.
+func SuitableArchitectures(ctx context.Context, tx *db.ClusterTx, projectName string, sourceInst *cluster.Instance, sourceImageRef string, req api.InstancesPost, remote RemoteImage) ([]int, error) {
 	// Handle cases where the architecture is already provided.
 	if slices.Contains([]api.SourceType{api.SourceTypeConversion, api.SourceTypeMigration, api.SourceTypeNone}, req.Source.Type) && req.Architecture != "" {
 		id, err := osarch.ArchitectureId(req.Architecture)
@@ -584,55 +584,13 @@ func SuitableArchitectures(ctx context.Context, s *state.State, tx *db.ClusterTx
 	// For image, things get a bit more complicated.
 	if req.Source.Type == api.SourceTypeImage {
 		// Handle remote image registries.
-		// If an image registry is specified, we rely on the pre-connected remote server
-		// provided by the caller to query the image's architecture.
 		if req.Source.ImageRegistry != "" {
-			if remote == nil {
-				// We can't query the registry if a connection wasn't provided.
+			if len(remote.IDs) == 0 {
 				// Returning nil/nil allows placement to proceed without specific architecture constraints.
 				return nil, nil
 			}
 
-			var img *api.Image
-			var err error
-			if req.Source.Secret != "" {
-				// For private images, we must fetch the full image information using the provided secret
-				// to determine the architecture.
-				img, _, err = remote.GetPrivateImage(sourceImageRef, req.Source.Secret)
-				if err != nil {
-					return nil, err
-				}
-			} else {
-				// For public images, first attempt to resolve architectures via aliases.
-				// This is faster as it avoids fetching the full image metadata if we only need the arch.
-				entries, err := remote.GetImageAliasArchitectures(string(req.Type), sourceImageRef)
-				if err == nil {
-					architectures := []int{}
-					for arch := range entries {
-						id, err := osarch.ArchitectureId(arch)
-						if err != nil {
-							return nil, err
-						}
-
-						architectures = append(architectures, id)
-					}
-
-					return architectures, nil
-				}
-
-				// Fallback to fetching full image info if alias resolution fails or isn't applicable.
-				img, _, err = remote.GetImage(sourceImageRef)
-				if err != nil {
-					return nil, err
-				}
-			}
-
-			id, err := osarch.ArchitectureId(img.Architecture)
-			if err != nil {
-				return nil, err
-			}
-
-			return []int{id}, nil
+			return slices.Clone(remote.IDs), nil
 		}
 
 		// Handle local images.

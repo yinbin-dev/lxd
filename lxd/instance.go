@@ -102,31 +102,41 @@ func ensureImageIsLocallyAvailable(ctx context.Context, s *state.State, img *api
 
 	defer unlock()
 
+	return ensureImageOnLocalMember(ctx, s, projectName, img.Fingerprint)
+}
+
+// ensureImageOnLocalMember copies the files of an image that already has a record in the project from the member
+// that holds them, and adds this member to the image record. It does nothing when this member holds the files.
+// The caller holds the image operation lock.
+func ensureImageOnLocalMember(ctx context.Context, s *state.State, projectName string, fingerprint string) error {
 	var memberAddress string
 
-	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-		memberAddress, err = tx.LocateImage(ctx, img.Fingerprint)
+	err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+		memberAddress, err = tx.LocateImage(ctx, fingerprint)
 
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("Failed locating image %q: %w", img.Fingerprint, err)
+		return fmt.Errorf("Failed locating image %q in the cluster: %w", fingerprint, err)
 	}
 
-	if memberAddress != "" {
-		// The image is available from another node, let's try to import it.
-		err = instanceImageTransfer(ctx, s, projectName, projectName, img.Fingerprint, memberAddress)
-		if err != nil {
-			return fmt.Errorf("Failed transferring image %q from %q: %w", img.Fingerprint, memberAddress, err)
-		}
+	if memberAddress == "" {
+		return nil
+	}
 
-		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-			// As the image record already exists in the project, just add the node ID to the image.
-			return tx.AddImageToLocalNode(ctx, projectName, img.Fingerprint)
-		})
-		if err != nil {
-			return fmt.Errorf("Failed adding transferred image %q record to local cluster member: %w", img.Fingerprint, err)
-		}
+	// The image is available from another member, let's try to import it.
+	err = instanceImageTransfer(ctx, s, projectName, projectName, fingerprint, memberAddress)
+	if err != nil {
+		return fmt.Errorf("Failed transferring image %q from %q: %w", fingerprint, memberAddress, err)
+	}
+
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		// As the image record already exists in the project, just add the member ID to the image.
+		return tx.AddImageToLocalNode(ctx, projectName, fingerprint)
+	})
+	if err != nil {
+		return fmt.Errorf("Failed adding transferred image %q to local cluster member: %w", fingerprint, err)
 	}
 
 	return nil

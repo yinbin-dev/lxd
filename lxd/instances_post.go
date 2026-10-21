@@ -1689,28 +1689,18 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 		}
 	}
 
-	// If the instance type wasn't specified and we have a LXD protocol registry, pre-fetch the image
-	// type from the remote so we can infer it inside the main transaction without making a
-	// network call while holding the DB lock.
-	var remoteImageType string
-	if req.Type == "" && imageRegistry != nil && imageRegistry.Protocol == api.ImageRegistryProtocolLXD && remoteServer != nil {
+	// Read the image from its registry before the main transaction, so that the transaction holds no network
+	// call. The result gives the type of the image, when the request has none, and its architectures.
+	var remoteImage instance.RemoteImage
+	if remoteServer != nil && !clusterNotification {
 		imgRef := req.Source.Fingerprint
 		if imgRef == "" {
 			imgRef = req.Source.Alias
 		}
 
-		if imgRef != "" {
-			// Try resolving as an alias first, as the fingerprint field may contain an alias name.
-			alias, _, err := remoteServer.GetImageAlias(imgRef)
-			if err == nil {
-				remoteImageType = alias.Type
-			} else {
-				// Fall back to fetching by fingerprint.
-				info, _, err := remoteServer.GetImage(imgRef)
-				if err == nil {
-					remoteImageType = info.Type
-				}
-			}
+		remoteImage, err = instance.ResolveRemoteImage(remoteServer, imageRegistry.Protocol, req, imgRef)
+		if err != nil {
+			return response.SmartError(err)
 		}
 	}
 
@@ -1852,8 +1842,8 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 					var imgType string
 					if sourceImage != nil {
 						imgType = sourceImage.Type
-					} else if remoteImageType != "" {
-						imgType = remoteImageType
+					} else if remoteImage.Type != "" {
+						imgType = remoteImage.Type
 					}
 
 					if imgType != "" {
@@ -1947,7 +1937,7 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 		}
 
 		if s.ServerClustered && !clusterNotification && targetMemberInfo == nil {
-			targetMemberInfo, placementGroupName, err = instancesPostPlace(ctx, s, tx, targetProject, req, profiles, sourceInst, sourceImageRef, remoteServer, allMembers, targetGroupName)
+			targetMemberInfo, placementGroupName, err = instancesPostPlace(ctx, s, tx, targetProject, req, profiles, sourceInst, sourceImageRef, remoteImage, allMembers, targetGroupName)
 			if err != nil {
 				return err
 			}

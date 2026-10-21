@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 
-	lxd "github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/lxd/db"
 	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
 	"github.com/canonical/lxd/lxd/instance"
@@ -18,10 +17,9 @@ import (
 // instancesPostPlace selects the cluster member for a new instance. It filters the members on the architectures of
 // the source, the cluster group of the target, and the cluster groups that the project permits, and then applies the
 // placement group of the instance. It also returns the name of the placement group.
-func instancesPostPlace(ctx context.Context, s *state.State, tx *db.ClusterTx, targetProject *api.Project, req api.InstancesPost, profiles []api.Profile, sourceInst *dbCluster.Instance, sourceImageRef string, remoteServer lxd.ImageServer, allMembers []db.NodeInfo, targetGroupName string) (*db.NodeInfo, string, error) {
+func instancesPostPlace(ctx context.Context, s *state.State, tx *db.ClusterTx, targetProject *api.Project, req api.InstancesPost, profiles []api.Profile, sourceInst *dbCluster.Instance, sourceImageRef string, remoteImage instance.RemoteImage, allMembers []db.NodeInfo, targetGroupName string) (*db.NodeInfo, string, error) {
 	// Determine which cluster members are suitable for this instance based on its image architecture.
-	// We pass the pre-connected remoteServer (if any) to resolve architectures for registry-based images.
-	architectures, err := instance.SuitableArchitectures(ctx, s, tx, targetProject.Name, sourceInst, sourceImageRef, req, remoteServer)
+	architectures, err := instance.SuitableArchitectures(ctx, tx, targetProject.Name, sourceInst, sourceImageRef, req, remoteImage)
 	if err != nil {
 		return nil, "", err
 	}

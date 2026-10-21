@@ -77,6 +77,24 @@ func (c *ClusterTx) CreateImageSource(ctx context.Context, id int, imageRegistry
 	return err
 }
 
+// FindCachedImageSourceFingerprint returns the fingerprint and the architecture of a locally cached image of the given
+// image registry and alias, for the first of the architectures that has one. It returns an empty fingerprint when no
+// architecture has one.
+func (c *ClusterTx) FindCachedImageSourceFingerprint(ctx context.Context, imageRegistry string, alias string, typeName string, architectures []int) (string, int, error) {
+	for _, architecture := range architectures {
+		fingerprint, err := c.GetCachedImageSourceFingerprint(ctx, imageRegistry, alias, typeName, architecture)
+		if err == nil {
+			return fingerprint, architecture, nil
+		}
+
+		if !api.StatusErrorCheck(err, http.StatusNotFound) {
+			return "", 0, err
+		}
+	}
+
+	return "", 0, nil
+}
+
 // GetCachedImageSourceFingerprint tries to find a source entry of a locally
 // cached image that matches the given remote details (image registry and alias).
 // Returns the fingerprint linked to the matching entry, if any.

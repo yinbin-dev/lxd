@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"testing"
 	"time"
 
@@ -215,4 +219,58 @@ func TestSelectRegistryImage(t *testing.T) {
 		return nil
 	})
 	require.NoError(t, err)
+}
+
+func TestHandoffDidNotOccur(t *testing.T) {
+	// requestErr wraps err as the client does for a failed request.
+	requestErr := func(err error) error {
+		return &url.Error{
+			Op:  http.MethodPost,
+			URL: "https://10.0.0.2:8443/internal/instances/create",
+			Err: err,
+		}
+	}
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "The target answers with a not found error",
+			err:  api.StatusErrorf(http.StatusNotFound, "Instance creation was cancelled"),
+			want: true,
+		},
+		{
+			name: "The target answers with an internal error",
+			err:  fmt.Errorf("Failed creating instance: %w", api.NewStatusError(http.StatusInternalServerError, "Failure")),
+			want: true,
+		},
+		{
+			name: "The connection to the target fails",
+			err:  requestErr(&net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}),
+			want: true,
+		},
+		{
+			name: "The response of the target is lost",
+			err:  requestErr(&net.OpError{Op: "read", Net: "tcp", Err: errors.New("connection reset by peer")}),
+			want: false,
+		},
+		{
+			name: "The request times out",
+			err:  requestErr(context.DeadlineExceeded),
+			want: false,
+		},
+		{
+			name: "An error of unknown origin",
+			err:  errors.New("Unknown failure"),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, handoffDidNotOccur(tt.err))
+		})
+	}
 }

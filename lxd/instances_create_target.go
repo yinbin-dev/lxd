@@ -28,6 +28,9 @@ import (
 	"github.com/canonical/lxd/shared/version"
 )
 
+// instanceCreateRequestTimeout is the deadline of the internal create request.
+const instanceCreateRequestTimeout = 30 * time.Second
+
 // internalInstanceCreatePost is the body of the internal create request that the receiver sends to the target to
 // complete the creation of an instance row that the receiver wrote.
 type internalInstanceCreatePost struct {

@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
+	"net"
 	"net/http"
 	"slices"
 
+	"github.com/canonical/lxd/lxd/cluster"
 	"github.com/canonical/lxd/lxd/db"
 	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
 	deviceConfig "github.com/canonical/lxd/lxd/device/config"
@@ -14,8 +17,10 @@ import (
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/placement"
 	"github.com/canonical/lxd/lxd/project/limits"
+	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/state"
 	"github.com/canonical/lxd/shared/api"
+	"github.com/canonical/lxd/shared/logger"
 	"github.com/canonical/lxd/shared/osarch"
 )
 
@@ -285,4 +290,82 @@ func instancesPostCreateRecord(ctx context.Context, s *state.State, tx *db.Clust
 	createReq.ID = stored.ID
 
 	return createReq, nil
+}
+
+// instancesPostSendCreate sends the internal create request to the target member of the instance row, or runs it on
+// this member for a nil or local target, and returns the operation of the target. When the handoff does not occur,
+// it removes the row.
+func instancesPostSendCreate(r *http.Request, s *state.State, createReq internalInstanceCreatePost, target *db.NodeInfo) response.Response {
+	if target == nil || target.Address == "" || target.Name == s.ServerName {
+		op, err := instanceCreateOnTarget(s, r, createReq)
+		if err != nil {
+			instancesPostDeleteRecord(s, createReq)
+			return response.SmartError(err)
+		}
+
+		return response.OperationResponse(op)
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), instanceCreateRequestTimeout)
+	defer cancel()
+
+	client, err := cluster.Connect(ctx, target.Address, s.Endpoints.NetworkCert(), s.ServerCert(), true)
+	if err != nil {
+		instancesPostDeleteRecord(s, createReq)
+		return response.SmartError(err)
+	}
+
+	logger.Debug("Send internal instance create request", logger.Ctx{"local": s.ServerName, "target": target.Name, "project": createReq.Project, "instance": createReq.Name})
+	opAPI, err := requestOperation(client, api.NewURL().Path("internal", "instances", "create"), createReq)
+	if err == nil {
+		logger.Debug("Target took over the instance row", logger.Ctx{"target": target.Name, "project": createReq.Project, "instance": createReq.Name})
+		return response.ForwardedOperationResponse(opAPI)
+	}
+
+	if handoffDidNotOccur(err) {
+		instancesPostDeleteRecord(s, createReq)
+		return response.SmartError(err)
+	}
+
+	// The request timed out, or its response is lost. The target can hold the row.
+	var held bool
+	heldErr := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+		held, err = tx.IsInstanceHeld(ctx, createReq.ID)
+		return err
+	})
+	if heldErr == nil && held {
+		return response.SmartError(fmt.Errorf("The creation of instance %q continues on cluster member %q: %w", createReq.Name, target.Name, err))
+	}
+
+	logger.Warn("Left the instance row of a create request that failed with an unknown result", logger.Ctx{"project": createReq.Project, "instance": createReq.Name, "target": target.Name, "err": err, "heldCheckErr": heldErr})
+	return response.SmartError(fmt.Errorf("Failed sending the creation of instance %q to cluster member %q. Examine the instance, and delete it if it has no storage: %w", createReq.Name, target.Name, err))
+}
+
+// handoffDidNotOccur reports whether err from the internal create request shows that the target did not take over
+// the instance row: the target answered with an error, or the connection to the target failed.
+func handoffDidNotOccur(err error) bool {
+	if api.StatusErrorCheck(err) {
+		return true
+	}
+
+	netErr, ok := errors.AsType[*net.OpError](err)
+
+	return ok && netErr.Op == "dial"
+}
+
+// instancesPostDeleteRecord removes the instance row of createReq when no operation holds it.
+func instancesPostDeleteRecord(s *state.State, createReq internalInstanceCreatePost) {
+	var deleted bool
+	err := s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		var err error
+		deleted, err = tx.DeleteInstanceIfNotHeld(ctx, createReq.ID)
+		return err
+	})
+	if err != nil {
+		logger.Warn("Failed deleting the instance row of a failed create request", logger.Ctx{"project": createReq.Project, "instance": createReq.Name, "err": err})
+		return
+	}
+
+	logger.Debug("Receiver delete of an instance row", logger.Ctx{"project": createReq.Project, "instance": createReq.Name, "deleted": deleted})
 }

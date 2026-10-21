@@ -59,6 +59,7 @@ var apiInternal = []APIEndpoint{
 	internalGarbageCollectorCmd,
 	internalImageOptimizeCmd,
 	internalImageRefreshCmd,
+	internalInstanceCreateCmd,
 	internalRAFTSnapshotCmd,
 	internalReadyCmd,
 	internalShutdownCmd,

@@ -254,34 +254,13 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 		}
 	} else if !response.IsNotFoundError(err) {
 		return nil, err
-	} else if info != nil && args.SetCached && !args.UserRequested && alias != fp {
-		// Registry-sourced: an identical image previously cached from the same source can be reused instead
-		// of downloading it again. Only a cached image pulled from an identical source is reused, so that its
-		// source and auto-update metadata stay correct and an unrelated image from another project is not
-		// reused. If none is found, fall through to downloading below.
-		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-			_, imgInfo, err = cluster.GetCachedImageWithSource(ctx, tx.Tx(), fp, args.ImageRegistry, alias)
-			return err
-		})
-		if err != nil && !response.IsNotFoundError(err) {
+	} else {
+		imgInfo, err = findImageInOtherProject(ctx, s, args, fp, alias, info)
+		if err != nil {
 			return nil, err
 		}
 
-		reuseFromOtherProject = err == nil
-	} else if args.SourceProjectName != "" {
-		// Local cross-project copy: reuse the copy from the source project the caller explicitly requested.
-		// Only the caller-specified source project is consulted, never an arbitrary project, so that an image
-		// is never disclosed from a project the caller did not request and is not authorized for. If the image
-		// is not found there, fall through to the not-found handling below.
-		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-			_, imgInfo, err = tx.GetImage(ctx, fp, cluster.ImageFilter{Project: &args.SourceProjectName})
-			return err
-		})
-		if err != nil && !response.IsNotFoundError(err) {
-			return nil, err
-		}
-
-		reuseFromOtherProject = err == nil
+		reuseFromOtherProject = imgInfo != nil
 	}
 
 	if reuseFromOtherProject {
@@ -300,6 +279,42 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	}
 
 	return downloadRegistryImage(ctx, s, op, args, l, remote, fp, alias, info, sourceAliases)
+}
+
+// findImageInOtherProject returns the copy of image fp in a different project that ImageDownload can reuse: a
+// cached copy from the same image registry and alias, or the copy in the source project of args. It returns nil
+// when it finds none.
+func findImageInOtherProject(ctx context.Context, s *state.State, args *ImageDownloadArgs, fp string, alias string, info *api.Image) (*api.Image, error) {
+	var imgInfo *api.Image
+	var err error
+
+	if info != nil && args.SetCached && !args.UserRequested && alias != fp {
+		// Registry-sourced: an identical image previously cached from the same source can be reused instead
+		// of downloading it again. Only a cached image pulled from an identical source is reused, so that its
+		// source and auto-update metadata stay correct and an unrelated image from another project is not
+		// reused. If none is found, fall through to downloading below.
+		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			_, imgInfo, err = cluster.GetCachedImageWithSource(ctx, tx.Tx(), fp, args.ImageRegistry, alias)
+			return err
+		})
+		if err != nil && !response.IsNotFoundError(err) {
+			return nil, err
+		}
+	} else if args.SourceProjectName != "" {
+		// Local cross-project copy: reuse the copy from the source project the caller explicitly requested.
+		// Only the caller-specified source project is consulted, never an arbitrary project, so that an image
+		// is never disclosed from a project the caller did not request and is not authorized for. If the image
+		// is not found there, fall through to the not-found handling below.
+		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+			_, imgInfo, err = tx.GetImage(ctx, fp, cluster.ImageFilter{Project: &args.SourceProjectName})
+			return err
+		})
+		if err != nil && !response.IsNotFoundError(err) {
+			return nil, err
+		}
+	}
+
+	return imgInfo, nil
 }
 
 // copyImageFromProject writes the record of imgInfo, an image of a different project, in the project of args, and

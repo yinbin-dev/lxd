@@ -233,6 +233,28 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 		}
 	}
 
+	imgInfo, sourceAliases, err := ensureClusterImage(ctx, s, args, fp, alias, info, sourceAliases)
+	if err != nil {
+		return nil, err
+	}
+
+	if imgInfo != nil {
+		return finishExistingImage(ctx, s, args, l, imgInfo, sourceAliases)
+	}
+
+	if args.ImageRegistry == "" {
+		return nil, fmt.Errorf("Image %q not found in the database", fp)
+	}
+
+	return downloadRegistryImage(ctx, s, op, args, l, remote, fp, alias, info, sourceAliases)
+}
+
+// ensureClusterImage makes an image that the cluster already has usable in the project of args on this member, and
+// returns its record and the source aliases. It returns a nil record when no project has a copy that it can use.
+// The caller holds the image operation lock of fp.
+func ensureClusterImage(ctx context.Context, s *state.State, args *ImageDownloadArgs, fp string, alias string, info *api.Image, sourceAliases []api.ImageAlias) (*api.Image, []api.ImageAlias, error) {
+	var err error
+
 	var imgInfo *api.Image
 
 	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
@@ -250,14 +272,14 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	if err == nil {
 		err = ensureImageOnLocalMember(ctx, s, args.ProjectName, imgInfo.Fingerprint)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	} else if !response.IsNotFoundError(err) {
-		return nil, err
+		return nil, nil, err
 	} else {
 		imgInfo, err = findImageInOtherProject(ctx, s, args, fp, alias, info)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		reuseFromOtherProject = imgInfo != nil
@@ -266,19 +288,11 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	if reuseFromOtherProject {
 		imgInfo, sourceAliases, err = copyImageFromProject(ctx, s, args, fp, alias, info, imgInfo, sourceAliases)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
-	if imgInfo != nil {
-		return finishExistingImage(ctx, s, args, l, imgInfo, sourceAliases)
-	}
-
-	if args.ImageRegistry == "" {
-		return nil, fmt.Errorf("Image %q not found in the database", fp)
-	}
-
-	return downloadRegistryImage(ctx, s, op, args, l, remote, fp, alias, info, sourceAliases)
+	return imgInfo, sourceAliases, nil
 }
 
 // findImageInOtherProject returns the copy of image fp in a different project that ImageDownload can reuse: a

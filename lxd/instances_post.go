@@ -1664,7 +1664,6 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 	var sourceImage *api.Image
 	var sourceImageRef string
 	var sourceMemberInfo *db.NodeInfo
-	var candidateMembers []db.NodeInfo
 	var targetMemberInfo *db.NodeInfo
 	var targetGroupName string
 	var placementGroupName string
@@ -1949,43 +1948,7 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 		}
 
 		if s.ServerClustered && !clusterNotification && targetMemberInfo == nil {
-			// Determine which cluster members are suitable for this instance based on its image architecture.
-			// We pass the pre-connected remoteServer (if any) to resolve architectures for registry-based images.
-			architectures, err := instance.SuitableArchitectures(ctx, s, tx, targetProjectName, sourceInst, sourceImageRef, req, remoteServer)
-			if err != nil {
-				return err
-			}
-
-			// If no architectures have been ascertained from the source then use the default
-			// architecture from project or global config if available.
-			if len(architectures) < 1 {
-				defaultArch := targetProject.Config["images.default_architecture"]
-				if defaultArch == "" {
-					defaultArch = s.GlobalConfig.ImagesDefaultArchitecture()
-				}
-
-				if defaultArch != "" {
-					defaultArchID, err := osarch.ArchitectureId(defaultArch)
-					if err != nil {
-						return err
-					}
-
-					architectures = append(architectures, defaultArchID)
-				} else {
-					architectures = nil // Don't exclude candidate members based on architecture.
-				}
-			}
-
-			clusterGroupsAllowed := limits.GetRestrictedClusterGroups(targetProject)
-
-			candidateMembers, err = tx.GetCandidateMembers(ctx, allMembers, architectures, targetGroupName, clusterGroupsAllowed, s.GlobalConfig.OfflineThreshold())
-			if err != nil {
-				return err
-			}
-
-			expandedConfig := instancetype.ExpandInstanceConfig(s.GlobalConfig.Dump(), req.Config, profiles)
-			placementGroupName = expandedConfig["placement.group"]
-			targetMemberInfo, err = instancesPostSelectClusterMember(ctx, tx, placementGroupName, candidateMembers, targetProject.Name)
+			targetMemberInfo, placementGroupName, err = instancesPostPlace(ctx, s, tx, targetProject, req, profiles, sourceInst, sourceImageRef, remoteServer, allMembers, targetGroupName)
 			if err != nil {
 				return err
 			}
@@ -2104,6 +2067,54 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 	default:
 		return response.BadRequest(fmt.Errorf("Unknown source type %s", req.Source.Type))
 	}
+}
+
+// instancesPostPlace selects the cluster member for a new instance. It filters the members on the architectures of
+// the source, the cluster group of the target, and the cluster groups that the project permits, and then applies the
+// placement group of the instance. It also returns the name of the placement group.
+func instancesPostPlace(ctx context.Context, s *state.State, tx *db.ClusterTx, targetProject *api.Project, req api.InstancesPost, profiles []api.Profile, sourceInst *dbCluster.Instance, sourceImageRef string, remoteServer lxd.ImageServer, allMembers []db.NodeInfo, targetGroupName string) (*db.NodeInfo, string, error) {
+	// Determine which cluster members are suitable for this instance based on its image architecture.
+	// We pass the pre-connected remoteServer (if any) to resolve architectures for registry-based images.
+	architectures, err := instance.SuitableArchitectures(ctx, s, tx, targetProject.Name, sourceInst, sourceImageRef, req, remoteServer)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// If no architectures have been ascertained from the source then use the default
+	// architecture from project or global config if available.
+	if len(architectures) < 1 {
+		defaultArch := targetProject.Config["images.default_architecture"]
+		if defaultArch == "" {
+			defaultArch = s.GlobalConfig.ImagesDefaultArchitecture()
+		}
+
+		if defaultArch != "" {
+			defaultArchID, err := osarch.ArchitectureId(defaultArch)
+			if err != nil {
+				return nil, "", err
+			}
+
+			architectures = append(architectures, defaultArchID)
+		} else {
+			architectures = nil // Don't exclude candidate members based on architecture.
+		}
+	}
+
+	clusterGroupsAllowed := limits.GetRestrictedClusterGroups(targetProject)
+
+	candidateMembers, err := tx.GetCandidateMembers(ctx, allMembers, architectures, targetGroupName, clusterGroupsAllowed, s.GlobalConfig.OfflineThreshold())
+	if err != nil {
+		return nil, "", err
+	}
+
+	expandedConfig := instancetype.ExpandInstanceConfig(s.GlobalConfig.Dump(), req.Config, profiles)
+	placementGroupName := expandedConfig["placement.group"]
+	targetMemberInfo, err := instancesPostSelectClusterMember(ctx, tx, placementGroupName, candidateMembers, targetProject.Name)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return targetMemberInfo, placementGroupName, nil
 }
 
 // instancesPostSelectClusterMember determines which cluster member to use for placing an instance during creation or migration.

@@ -464,6 +464,12 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 		return nil, fmt.Errorf("Image %q not found in the database", fp)
 	}
 
+	return downloadRegistryImage(ctx, s, op, args, l, remote, fp, alias, info, sourceAliases)
+}
+
+// downloadRegistryImage downloads image fp from the image registry remote into the project of args, writes its
+// record, and imports it into the storage pool of args. The caller holds the image operation lock of fp.
+func downloadRegistryImage(ctx context.Context, s *state.State, op *operations.Operation, args *ImageDownloadArgs, l logger.Logger, remote lxd.ImageServer, fp string, alias string, info *api.Image, sourceAliases []api.ImageAlias) (*api.Image, error) {
 	// Begin downloading
 	if op != nil {
 		l = l.AddContext(logger.Ctx{"trigger": op.URL(), "operation": op.ID()})

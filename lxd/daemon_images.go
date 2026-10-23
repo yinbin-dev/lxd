@@ -285,111 +285,9 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	}
 
 	if reuseFromOtherProject {
-		// The image was found in another project (a cached registry copy or the caller-specified source
-		// project). Resolve its current location and source aliases before preparing the transfer.
-		var nodeAddress string
-		otherProject := imgInfo.Project
-		sourceInfo := imgInfo.UpdateSource
-
-		// For a local cross-project copy, the reused image is the source, so adopt its aliases.
-		// For a registry-sourced image, keep the aliases already fetched from the remote so that
-		// "--copy-aliases" reflects the registry, not whichever project happened to cache the image.
-		if info == nil {
-			sourceAliases = imgInfo.Aliases
-		}
-
-		// When the image was resolved from an image registry, overwrite all fields with those from the
-		// resolved source so that no properties are copied from the other project.
-		if info != nil {
-			imgInfo.Project = args.ProjectName
-			imgInfo.Fingerprint = info.Fingerprint
-			imgInfo.Filename = info.Filename
-			imgInfo.Size = info.Size
-			imgInfo.Public = args.Public
-			imgInfo.AutoUpdate = args.AutoUpdate
-			imgInfo.Architecture = info.Architecture
-			imgInfo.CreatedAt = info.CreatedAt
-			imgInfo.ExpiresAt = info.ExpiresAt
-			imgInfo.Properties = info.Properties
-			imgInfo.Type = info.Type
-		}
-
-		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-			// Check if the image is already available locally or on another node. We need to do this before
-			// inserting the record for the new project to avoid finding ourselves in the search results.
-			nodeAddress, err = tx.LocateImage(ctx, imgInfo.Fingerprint)
-			if err != nil {
-				return fmt.Errorf("Locate image %q in the cluster: %w", imgInfo.Fingerprint, err)
-			}
-
-			// Create the image record in the database for the new target project.
-			err = tx.CreateImage(ctx, args.ProjectName, imgInfo.Fingerprint, imgInfo.Filename, imgInfo.Size, args.Public, imgInfo.AutoUpdate, imgInfo.Architecture, imgInfo.CreatedAt, imgInfo.ExpiresAt, imgInfo.Properties, imgInfo.Type, nil)
-			if err != nil {
-				return fmt.Errorf("Failed creating image record for project: %w", err)
-			}
-
-			// Mark the image as "cached" if downloading for an instance.
-			if args.SetCached {
-				err = tx.SetImageCachedAndLastUseDate(ctx, args.ProjectName, imgInfo.Fingerprint, time.Now().UTC())
-				if err != nil {
-					return fmt.Errorf("Failed setting cached flag and last use date: %w", err)
-				}
-			}
-
-			var id int
-
-			id, imgInfo, err = tx.GetImage(ctx, fp, cluster.ImageFilter{Project: &args.ProjectName})
-			if err != nil {
-				return err
-			}
-
-			// Restore the source aliases so the caller can handle them (e.g., if --copy-aliases is used).
-			imgInfo.Aliases = sourceAliases
-
-			imageRegistry := args.ImageRegistry
-			imageAlias := alias
-
-			// Use the existing image's update source if no registry is provided in the args.
-			if imageRegistry == "" && sourceInfo != nil {
-				imageRegistry = sourceInfo.ImageRegistry
-				imageAlias = sourceInfo.Alias
-			}
-
-			if imageRegistry != "" {
-				return tx.CreateImageSource(ctx, id, imageRegistry, imageAlias)
-			}
-
-			return nil
-		})
+		imgInfo, sourceAliases, err = copyImageFromProject(ctx, s, args, fp, alias, info, imgInfo, sourceAliases)
 		if err != nil {
 			return nil, err
-		}
-
-		// If the image files exist on another cluster node, initiate a transfer.
-		if nodeAddress != "" {
-			err = instanceImageTransfer(ctx, s, args.ProjectName, otherProject, imgInfo.Fingerprint, nodeAddress)
-			if err != nil {
-				return nil, fmt.Errorf("Failed transferring image: %w", err)
-			}
-		} else {
-			// If the image files are available locally but in another project with a different storage
-			// volume, perform a local file copy between storage paths.
-			if s.LocalConfig.StorageImagesVolume(otherProject) != s.LocalConfig.StorageImagesVolume(args.ProjectName) {
-				sourcePath := filepath.Join(s.ImagesStoragePath(otherProject), imgInfo.Fingerprint)
-				destPath := s.ImagesStoragePath(args.ProjectName)
-
-				_, err = rsync.CopyFile(sourcePath, destPath, "", false)
-				if err != nil {
-					return nil, fmt.Errorf("Failed copying image files from other project: %w", err)
-				}
-
-				if shared.PathExists(sourcePath + ".rootfs") {
-					_, err = rsync.CopyFile(sourcePath+".rootfs", destPath, "", false)
-					if err != nil {
-						return nil, fmt.Errorf("Failed copying image files from other project: %w", err)
-					}
-				}
-			}
 		}
 	}
 
@@ -402,6 +300,121 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	}
 
 	return downloadRegistryImage(ctx, s, op, args, l, remote, fp, alias, info, sourceAliases)
+}
+
+// copyImageFromProject writes the record of imgInfo, an image of a different project, in the project of args, and
+// copies its files to this member. It returns the new record and the source aliases.
+func copyImageFromProject(ctx context.Context, s *state.State, args *ImageDownloadArgs, fp string, alias string, info *api.Image, imgInfo *api.Image, sourceAliases []api.ImageAlias) (*api.Image, []api.ImageAlias, error) {
+	var err error
+
+	// The image was found in another project (a cached registry copy or the caller-specified source
+	// project). Resolve its current location and source aliases before preparing the transfer.
+	var nodeAddress string
+	otherProject := imgInfo.Project
+	sourceInfo := imgInfo.UpdateSource
+
+	// For a local cross-project copy, the reused image is the source, so adopt its aliases.
+	// For a registry-sourced image, keep the aliases already fetched from the remote so that
+	// "--copy-aliases" reflects the registry, not whichever project happened to cache the image.
+	if info == nil {
+		sourceAliases = imgInfo.Aliases
+	}
+
+	// When the image was resolved from an image registry, overwrite all fields with those from the
+	// resolved source so that no properties are copied from the other project.
+	if info != nil {
+		imgInfo.Project = args.ProjectName
+		imgInfo.Fingerprint = info.Fingerprint
+		imgInfo.Filename = info.Filename
+		imgInfo.Size = info.Size
+		imgInfo.Public = args.Public
+		imgInfo.AutoUpdate = args.AutoUpdate
+		imgInfo.Architecture = info.Architecture
+		imgInfo.CreatedAt = info.CreatedAt
+		imgInfo.ExpiresAt = info.ExpiresAt
+		imgInfo.Properties = info.Properties
+		imgInfo.Type = info.Type
+	}
+
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		// Check if the image is already available locally or on another node. We need to do this before
+		// inserting the record for the new project to avoid finding ourselves in the search results.
+		nodeAddress, err = tx.LocateImage(ctx, imgInfo.Fingerprint)
+		if err != nil {
+			return fmt.Errorf("Locate image %q in the cluster: %w", imgInfo.Fingerprint, err)
+		}
+
+		// Create the image record in the database for the new target project.
+		err = tx.CreateImage(ctx, args.ProjectName, imgInfo.Fingerprint, imgInfo.Filename, imgInfo.Size, args.Public, imgInfo.AutoUpdate, imgInfo.Architecture, imgInfo.CreatedAt, imgInfo.ExpiresAt, imgInfo.Properties, imgInfo.Type, nil)
+		if err != nil {
+			return fmt.Errorf("Failed creating image record for project: %w", err)
+		}
+
+		// Mark the image as "cached" if downloading for an instance.
+		if args.SetCached {
+			err = tx.SetImageCachedAndLastUseDate(ctx, args.ProjectName, imgInfo.Fingerprint, time.Now().UTC())
+			if err != nil {
+				return fmt.Errorf("Failed setting cached flag and last use date: %w", err)
+			}
+		}
+
+		var id int
+
+		id, imgInfo, err = tx.GetImage(ctx, fp, cluster.ImageFilter{Project: &args.ProjectName})
+		if err != nil {
+			return err
+		}
+
+		// Restore the source aliases so the caller can handle them (e.g., if --copy-aliases is used).
+		imgInfo.Aliases = sourceAliases
+
+		imageRegistry := args.ImageRegistry
+		imageAlias := alias
+
+		// Use the existing image's update source if no registry is provided in the args.
+		if imageRegistry == "" && sourceInfo != nil {
+			imageRegistry = sourceInfo.ImageRegistry
+			imageAlias = sourceInfo.Alias
+		}
+
+		if imageRegistry != "" {
+			return tx.CreateImageSource(ctx, id, imageRegistry, imageAlias)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// If the image files exist on another cluster node, initiate a transfer.
+	if nodeAddress != "" {
+		err = instanceImageTransfer(ctx, s, args.ProjectName, otherProject, imgInfo.Fingerprint, nodeAddress)
+		if err != nil {
+			return nil, nil, fmt.Errorf("Failed transferring image: %w", err)
+		}
+	} else {
+		// If the image files are available locally but in another project with a different storage
+		// volume, perform a local file copy between storage paths.
+		if s.LocalConfig.StorageImagesVolume(otherProject) != s.LocalConfig.StorageImagesVolume(args.ProjectName) {
+			sourcePath := filepath.Join(s.ImagesStoragePath(otherProject), imgInfo.Fingerprint)
+			destPath := s.ImagesStoragePath(args.ProjectName)
+
+			_, err = rsync.CopyFile(sourcePath, destPath, "", false)
+			if err != nil {
+				return nil, nil, fmt.Errorf("Failed copying image files from other project: %w", err)
+			}
+
+			if shared.PathExists(sourcePath + ".rootfs") {
+				_, err = rsync.CopyFile(sourcePath+".rootfs", destPath, "", false)
+				if err != nil {
+					return nil, nil, fmt.Errorf("Failed copying image files from other project: %w", err)
+				}
+			}
+		}
+	}
+
+	return imgInfo, sourceAliases, nil
 }
 
 // finishExistingImage returns imgInfo, an image that the project of args has on this member, with the source

@@ -394,70 +394,7 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	}
 
 	if imgInfo != nil {
-		info = imgInfo
-		l = l.AddContext(logger.Ctx{"fingerprint": info.Fingerprint, "autoUpdate": info.AutoUpdate, "imgProject": info.Project})
-		l.Debug("Image already exists in the DB")
-
-		// Pass the source aliases back to the caller so they can be processed (e.g., if --copy-aliases is used).
-		// When the image already exists locally without a resolved source, keep the aliases loaded from
-		// the database rather than overwriting them with a nil source alias list.
-		if sourceAliases != nil {
-			info.Aliases = sourceAliases
-		}
-
-		var poolID int64
-		var poolIDs []int64
-		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-			// If the image already exists, is cached and that it is
-			// requested to be downloaded from an explicit `image copy` operation, then disable its `cache` parameter
-			// so that it won't be candidate for auto removal.
-			if imgInfo.Cached && args.UserRequested {
-				err = tx.UnsetImageCached(ctx, args.ProjectName, imgInfo.Fingerprint)
-				if err != nil {
-					return err
-				}
-			}
-
-			if args.StoragePool != "" {
-				// Get the ID of the target storage pool.
-				poolID, err = tx.GetStoragePoolID(ctx, args.StoragePool)
-				if err != nil {
-					return err
-				}
-
-				// Check if the image is already in the pool.
-				poolIDs, err = tx.GetPoolsWithImage(ctx, info.Fingerprint)
-
-				return err
-			}
-
-			return nil
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		// If not requested in a particular pool, we're done.
-		if args.StoragePool == "" {
-			return info, nil
-		}
-
-		if slices.Contains(poolIDs, poolID) {
-			l.Debug("Image already exists on storage pool")
-			return info, nil
-		}
-
-		// Import the image in the pool.
-		l.Debug("Image does not exist on storage pool")
-
-		err = imageCreateInPool(ctx, s, info, args.StoragePool, args.ProjectName)
-		if err != nil {
-			l.Debug("Failed creating image on storage pool", logger.Ctx{"err": err})
-			return nil, fmt.Errorf("Failed creating image %q on storage pool %q: %w", info.Fingerprint, args.StoragePool, err)
-		}
-
-		l.Debug("Created image on storage pool")
-		return info, nil
+		return finishExistingImage(ctx, s, args, l, imgInfo, sourceAliases)
 	}
 
 	if args.ImageRegistry == "" {
@@ -465,6 +402,77 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 	}
 
 	return downloadRegistryImage(ctx, s, op, args, l, remote, fp, alias, info, sourceAliases)
+}
+
+// finishExistingImage returns imgInfo, an image that the project of args has on this member, with the source
+// aliases. It clears the cached flag for a user request, and imports the image into the storage pool of args.
+func finishExistingImage(ctx context.Context, s *state.State, args *ImageDownloadArgs, l logger.Logger, imgInfo *api.Image, sourceAliases []api.ImageAlias) (*api.Image, error) {
+	var err error
+
+	info := imgInfo
+	l = l.AddContext(logger.Ctx{"fingerprint": info.Fingerprint, "autoUpdate": info.AutoUpdate, "imgProject": info.Project})
+	l.Debug("Image already exists in the DB")
+
+	// Pass the source aliases back to the caller so they can be processed (e.g., if --copy-aliases is used).
+	// When the image already exists locally without a resolved source, keep the aliases loaded from
+	// the database rather than overwriting them with a nil source alias list.
+	if sourceAliases != nil {
+		info.Aliases = sourceAliases
+	}
+
+	var poolID int64
+	var poolIDs []int64
+	err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
+		// If the image already exists, is cached and that it is
+		// requested to be downloaded from an explicit `image copy` operation, then disable its `cache` parameter
+		// so that it won't be candidate for auto removal.
+		if imgInfo.Cached && args.UserRequested {
+			err = tx.UnsetImageCached(ctx, args.ProjectName, imgInfo.Fingerprint)
+			if err != nil {
+				return err
+			}
+		}
+
+		if args.StoragePool != "" {
+			// Get the ID of the target storage pool.
+			poolID, err = tx.GetStoragePoolID(ctx, args.StoragePool)
+			if err != nil {
+				return err
+			}
+
+			// Check if the image is already in the pool.
+			poolIDs, err = tx.GetPoolsWithImage(ctx, info.Fingerprint)
+
+			return err
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// If not requested in a particular pool, we're done.
+	if args.StoragePool == "" {
+		return info, nil
+	}
+
+	if slices.Contains(poolIDs, poolID) {
+		l.Debug("Image already exists on storage pool")
+		return info, nil
+	}
+
+	// Import the image in the pool.
+	l.Debug("Image does not exist on storage pool")
+
+	err = imageCreateInPool(ctx, s, info, args.StoragePool, args.ProjectName)
+	if err != nil {
+		l.Debug("Failed creating image on storage pool", logger.Ctx{"err": err})
+		return nil, fmt.Errorf("Failed creating image %q on storage pool %q: %w", info.Fingerprint, args.StoragePool, err)
+	}
+
+	l.Debug("Created image on storage pool")
+	return info, nil
 }
 
 // downloadRegistryImage downloads image fp from the image registry remote into the project of args, writes its

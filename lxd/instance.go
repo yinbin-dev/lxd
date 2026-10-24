@@ -861,7 +861,7 @@ func getSourceImageFromInstanceSource(ctx context.Context, s *state.State, tx *d
 	if source.ImageRegistry != "" {
 		for _, architecture := range s.OS.Architectures {
 			cachedFingerprint, err := tx.GetCachedImageSourceFingerprint(ctx, source.ImageRegistry, *imageRef, instType, architecture)
-			if err == nil && cachedFingerprint != sourceImageHash {
+			if err == nil {
 				sourceImageHash = cachedFingerprint
 				break
 			}

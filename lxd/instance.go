@@ -859,12 +859,13 @@ func getSourceImageFromInstanceSource(ctx context.Context, s *state.State, tx *d
 	// If so then use the cached image fingerprint for loading the cache image profiles.
 	// As its possible for a remote cached image to have its profiles modified after download.
 	if source.ImageRegistry != "" {
-		for _, architecture := range s.OS.Architectures {
-			cachedFingerprint, err := tx.GetCachedImageSourceFingerprint(ctx, source.ImageRegistry, *imageRef, instType, architecture)
-			if err == nil {
-				sourceImageHash = cachedFingerprint
-				break
-			}
+		cachedFingerprint, _, err := tx.FindCachedImageSourceFingerprint(ctx, source.ImageRegistry, *imageRef, instType, s.OS.Architectures)
+		if err != nil {
+			return nil, err
+		}
+
+		if cachedFingerprint != "" {
+			sourceImageHash = cachedFingerprint
 		}
 	}
 

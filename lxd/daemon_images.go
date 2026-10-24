@@ -217,12 +217,13 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 
 	if args.PreferCached && interval > 0 && alias != fp {
 		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
-			for _, architecture := range s.OS.Architectures {
-				cachedFingerprint, err := tx.GetCachedImageSourceFingerprint(ctx, args.ImageRegistry, alias, args.Type, architecture)
-				if err == nil {
-					fp = cachedFingerprint
-					break
-				}
+			cachedFingerprint, _, err := tx.FindCachedImageSourceFingerprint(ctx, args.ImageRegistry, alias, args.Type, s.OS.Architectures)
+			if err != nil {
+				return err
+			}
+
+			if cachedFingerprint != "" {
+				fp = cachedFingerprint
 			}
 
 			return nil

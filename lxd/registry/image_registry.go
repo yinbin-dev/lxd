@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/x509"
 	"fmt"
+	"net/http"
 	"net/url"
 	"slices"
 	"strings"
@@ -12,6 +13,9 @@ import (
 	"github.com/canonical/lxd/client"
 	"github.com/canonical/lxd/lxd/cluster"
 	"github.com/canonical/lxd/lxd/db"
+	dbCluster "github.com/canonical/lxd/lxd/db/cluster"
+	"github.com/canonical/lxd/lxd/project"
+	"github.com/canonical/lxd/lxd/response"
 	"github.com/canonical/lxd/lxd/state"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/version"
@@ -140,4 +144,33 @@ func ConnectImageRegistry(ctx context.Context, s *state.State, imageRegistry api
 	}
 
 	return imageServer, nil
+}
+
+// LoadImageRegistry returns the image registry with the given name. It returns a 403 error when the
+// restrictions of the project do not permit the registry.
+func LoadImageRegistry(ctx context.Context, tx *db.ClusterTx, projectName string, registryName string) (*api.ImageRegistry, error) {
+	projectConfig, err := dbCluster.GetProjectConfig(ctx, tx.Tx(), projectName)
+	if err != nil {
+		return nil, fmt.Errorf("Failed loading config for project %q: %w", projectName, err)
+	}
+
+	dbImageRegistry, err := dbCluster.GetImageRegistry(ctx, tx.Tx(), registryName)
+	if err != nil {
+		if response.IsNotFoundError(err) {
+			return nil, api.StatusErrorf(http.StatusNotFound, "Image registry not found")
+		}
+
+		return nil, fmt.Errorf("Failed fetching image registry %q: %w", registryName, err)
+	}
+
+	config, err := dbCluster.GetImageRegistryConfig(ctx, tx.Tx(), &dbImageRegistry.ID)
+	if err != nil {
+		return nil, fmt.Errorf("Failed loading image registry config: %w", err)
+	}
+
+	if !project.RegistryAllowed(projectConfig, registryName, dbImageRegistry.Builtin) {
+		return nil, api.StatusErrorf(http.StatusForbidden, "Image registry %q is not allowed in this project", registryName)
+	}
+
+	return dbImageRegistry.ToAPI(config), nil
 }

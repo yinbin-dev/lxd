@@ -219,7 +219,7 @@ func ImageDownload(ctx context.Context, s *state.State, op *operations.Operation
 		err = s.DB.Cluster.Transaction(context.TODO(), func(ctx context.Context, tx *db.ClusterTx) error {
 			for _, architecture := range s.OS.Architectures {
 				cachedFingerprint, err := tx.GetCachedImageSourceFingerprint(ctx, args.ImageRegistry, alias, args.Type, architecture)
-				if err == nil && cachedFingerprint != fp {
+				if err == nil {
 					fp = cachedFingerprint
 					break
 				}

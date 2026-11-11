@@ -6942,8 +6942,9 @@ func (d *qemu) delete(ctx context.Context, force bool) error {
 		return errors.New("Instance is protected from being deleted")
 	}
 
+	// An instance without a root volume record, for example after a failed create, has no volume in use.
 	err := d.checkRootVolumeNotInUse()
-	if err != nil {
+	if err != nil && !response.IsNotFoundError(err) {
 		return err
 	}
 

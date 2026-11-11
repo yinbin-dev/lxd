@@ -274,7 +274,7 @@ func instancesPostCreateRecord(ctx context.Context, s *state.State, tx *db.Clust
 		}
 	}
 
-	args, err = instance.PrepareCreate(s, args)
+	args, err = instance.PrepareCreate(s.OS, args)
 	if err != nil {
 		return internalInstanceCreatePost{}, api.StatusErrorf(http.StatusBadRequest, "%w", err)
 	}

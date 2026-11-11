@@ -5,6 +5,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/canonical/lxd/lxd/idmap"
+	"github.com/canonical/lxd/lxd/instance/instancetype"
+	"github.com/canonical/lxd/lxd/sys"
+	"github.com/canonical/lxd/shared/osarch"
 )
 
 func Test_lxcParseRawLXC(t *testing.T) {
@@ -123,7 +128,7 @@ lxc.log.file = "/dev/null"`,
 
 	for _, test := range tests {
 		t.Log("Running test case:", test.name)
-		err := lxcValidConfig(test.config)
+		err := lxcValidConfig(test.config, true)
 		if test.expectErr {
 			assert.Error(t, err, "Expected error for test case: %s", test.name)
 		} else {
@@ -131,11 +136,11 @@ lxc.log.file = "/dev/null"`,
 		}
 	}
 
-	err := lxcValidConfig(`lxc.idmap="u 0 0 1000"`)
+	err := lxcValidConfig(`lxc.idmap="u 0 0 1000"`, true)
 	assert.NoError(t, err, "Expected no error for valid unprivileged mapping")
 
 	t.Setenv("LXD_UNPRIVILEGED_ONLY", "1")
-	err = lxcValidConfig(`lxc.idmap="u 0 0 1000"`)
+	err = lxcValidConfig(`lxc.idmap="u 0 0 1000"`, true)
 	assert.Error(t, err, "Expected error for unprivileged mapping with LXD_UNPRIVILEGED_ONLY set")
 }
 
@@ -169,5 +174,92 @@ func Benchmark_DeviceNextInterfaceHWAddr(b *testing.B) {
 		if err != nil {
 			b.Fatalf("Failed getting next interface HW address: %v", err)
 		}
+	}
+}
+
+func TestValidConfigHostChecks(t *testing.T) {
+	s390x := &sys.OS{Architectures: []int{osarch.ARCH_64BIT_S390_BIG_ENDIAN}, IdmapSet: &idmap.IdmapSet{}}
+	x86 := &sys.OS{Architectures: []int{osarch.ARCH_64BIT_INTEL_X86}, IdmapSet: &idmap.IdmapSet{}}
+	noIdmap := &sys.OS{Architectures: []int{osarch.ARCH_64BIT_INTEL_X86}}
+
+	tests := []struct {
+		name       string
+		sysOS      *sys.OS
+		config     map[string]string
+		expanded   bool
+		unprivOnly bool
+		expectErr  bool
+	}{
+		{
+			name:      "deny_compat on a host without a compat architecture",
+			sysOS:     s390x,
+			config:    map[string]string{"security.syscalls.deny_compat": "true"},
+			expectErr: true,
+		},
+		{
+			name:   "deny_compat on a host with a compat architecture",
+			sysOS:  x86,
+			config: map[string]string{"security.syscalls.deny_compat": "true"},
+		},
+		{
+			name:   "deny_compat without a host",
+			config: map[string]string{"security.syscalls.deny_compat": "true"},
+		},
+		{
+			name:       "Privileged instance on a host that permits only unprivileged instances",
+			sysOS:      x86,
+			config:     map[string]string{"security.privileged": "true"},
+			unprivOnly: true,
+			expectErr:  true,
+		},
+		{
+			name:       "Privileged instance without a host",
+			config:     map[string]string{"security.privileged": "true"},
+			unprivOnly: true,
+		},
+		{
+			name:       "raw.lxc include on a host that permits only unprivileged instances",
+			sysOS:      x86,
+			config:     map[string]string{"raw.lxc": "lxc.include = /tmp/x"},
+			unprivOnly: true,
+			expectErr:  true,
+		},
+		{
+			name:       "raw.lxc include without a host",
+			config:     map[string]string{"raw.lxc": "lxc.include = /tmp/x"},
+			unprivOnly: true,
+		},
+		{
+			name:      "Unprivileged expanded config on a host without an idmap",
+			sysOS:     noIdmap,
+			config:    map[string]string{},
+			expanded:  true,
+			expectErr: true,
+		},
+		{
+			name:     "Unprivileged expanded config without a host",
+			config:   map[string]string{},
+			expanded: true,
+		},
+		{
+			name:      "Host-independent checks run without a host",
+			config:    map[string]string{"raw.seccomp": "x", "security.syscalls.deny_compat": "true"},
+			expectErr: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.unprivOnly {
+				t.Setenv("LXD_UNPRIVILEGED_ONLY", "true")
+			}
+
+			err := ValidConfig(test.sysOS, test.config, test.expanded, instancetype.Container)
+			if test.expectErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
 	}
 }

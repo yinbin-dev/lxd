@@ -3830,3 +3830,13 @@ New `lxc` commands:
 Adds support for `recursion=2` on `GET /1.0/cluster/members`. In addition to the cluster member information returned with `recursion=1`, each entry contains a `state` field with the member state (as returned by `GET /1.0/cluster/members/{name}/state`).
 
 The state of all members is fetched in parallel by the member handling the request. The `state` field is `null` for offline members and for members whose state could not be retrieved.
+
+(extension-instance-create-handoff)=
+## `instance_create_handoff`
+
+Changes how a cluster creates an instance from an image, or an empty instance, on a different member.
+The member that receives the request records the instance in the transaction that selects the target member.
+Then it sends an internal request to the target member, and the target member creates the instance.
+
+Cluster members with and without this extension use different internal requests to create an instance.
+The extension makes sure that all cluster members use the same internal request.

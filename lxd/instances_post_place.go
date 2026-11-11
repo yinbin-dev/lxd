@@ -274,7 +274,8 @@ func instancesPostCreateRecord(ctx context.Context, s *state.State, tx *db.Clust
 		}
 	}
 
-	args, err = instance.PrepareCreate(s.OS, args)
+	// The target validates the config that depends on its host when its driver creates the instance.
+	args, err = instance.PrepareCreate(nil, args)
 	if err != nil {
 		return internalInstanceCreatePost{}, api.StatusErrorf(http.StatusBadRequest, "%w", err)
 	}

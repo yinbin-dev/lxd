@@ -45,7 +45,7 @@ var Load func(s *state.State, args db.InstanceArgs, p api.Project) (Instance, er
 // Returns a revert fail function that can be used to undo this function if a subsequent step fails.
 var Create func(ctx context.Context, s *state.State, args db.InstanceArgs, p api.Project) (Instance, revert.Hook, error)
 
-// ValidConfig validates an instance's config.
+// ValidConfig validates an instance's config. A nil sysOS skips the checks that depend on the host.
 func ValidConfig(sysOS *sys.OS, config map[string]string, expanded bool, instanceType instancetype.Type) error {
 	if config == nil {
 		return nil
@@ -85,12 +85,12 @@ func ValidConfig(sysOS *sys.OS, config map[string]string, expanded bool, instanc
 		return err
 	}
 
-	if expanded && (shared.IsFalseOrEmpty(config["security.privileged"])) && sysOS.IdmapSet == nil {
+	if expanded && sysOS != nil && (shared.IsFalseOrEmpty(config["security.privileged"])) && sysOS.IdmapSet == nil {
 		return errors.New("LXD does not have a uid/gid allocation. In this mode, only privileged containers are supported")
 	}
 
 	unprivOnly := os.Getenv("LXD_UNPRIVILEGED_ONLY")
-	if shared.IsTrue(unprivOnly) {
+	if sysOS != nil && shared.IsTrue(unprivOnly) {
 		if config["raw.idmap"] != "" {
 			err := AllowedUnprivilegedOnlyMap(config["raw.idmap"])
 			if err != nil {
@@ -162,7 +162,7 @@ func validConfigKey(os *sys.OS, key string, value string, instanceType instancet
 		return lxcValidConfig(value)
 	}
 
-	if key == "security.syscalls.deny_compat" {
+	if key == "security.syscalls.deny_compat" && os != nil {
 		for _, arch := range os.Architectures {
 			if arch == osarch.ARCH_64BIT_INTEL_X86 ||
 				arch == osarch.ARCH_64BIT_ARMV8_LITTLE_ENDIAN ||
@@ -651,7 +651,7 @@ func CreateInternal(ctx context.Context, s *state.State, args db.InstanceArgs, c
 		return nil, nil, nil, err
 	}
 
-	args, err = PrepareCreate(s, args)
+	args, err = PrepareCreate(s.OS, args)
 	if err != nil {
 		return nil, nil, nil, err
 	}

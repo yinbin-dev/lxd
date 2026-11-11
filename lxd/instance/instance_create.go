@@ -18,6 +18,7 @@ import (
 	deviceConfig "github.com/canonical/lxd/lxd/device/config"
 	"github.com/canonical/lxd/lxd/instance/instancetype"
 	"github.com/canonical/lxd/lxd/state"
+	"github.com/canonical/lxd/lxd/sys"
 	"github.com/canonical/lxd/shared"
 	"github.com/canonical/lxd/shared/api"
 	"github.com/canonical/lxd/shared/logger"
@@ -26,7 +27,8 @@ import (
 )
 
 // PrepareCreate returns the args of a new instance or snapshot with their defaults set, and validates them without I/O.
-func PrepareCreate(s *state.State, args db.InstanceArgs) (db.InstanceArgs, error) {
+// A nil sysOS skips the checks that depend on the host, for an instance that a different member creates.
+func PrepareCreate(sysOS *sys.OS, args db.InstanceArgs) (db.InstanceArgs, error) {
 	if args.Project == "" {
 		args.Project = api.ProjectDefaultName
 	}
@@ -70,7 +72,7 @@ func PrepareCreate(s *state.State, args db.InstanceArgs) (db.InstanceArgs, error
 	}
 
 	// Validate instance config.
-	err = ValidConfig(s.OS, args.Config, false, args.Type)
+	err = ValidConfig(sysOS, args.Config, false, args.Type)
 	if err != nil {
 		return db.InstanceArgs{}, err
 	}

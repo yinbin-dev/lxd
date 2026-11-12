@@ -1809,8 +1809,16 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 			}
 		}
 
+		createInput := instancesPostCreateInput{
+			targetProject: targetProject,
+			req:           &req,
+			profiles:      profiles,
+			imageRef:      sourceImageRef,
+			remoteImage:   remoteImage,
+		}
+
 		if s.ServerClustered && !clusterNotification && targetMemberInfo == nil {
-			targetMemberInfo, placementGroupName, err = instancesPostPlace(ctx, s, tx, targetProject, req, profiles, sourceInst, sourceImageRef, remoteImage, allMembers, targetGroupName)
+			targetMemberInfo, placementGroupName, err = instancesPostPlace(ctx, s, tx, createInput, sourceInst, allMembers, targetGroupName)
 			if err != nil {
 				return err
 			}
@@ -1845,7 +1853,7 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 				clusterGroup = targetGroupName
 			}
 
-			createReq, err = instancesPostCreateRecord(ctx, s, tx, targetProject, &req, profiles, sourceImage, sourceImageRef, imageAuthorizationChecker != nil, remoteImage, targetMemberInfo, clusterGroup)
+			createReq, err = instancesPostCreateRecord(ctx, s, tx, createInput, sourceImage, imageAuthorizationChecker != nil, targetMemberInfo, clusterGroup)
 			if err != nil {
 				return err
 			}

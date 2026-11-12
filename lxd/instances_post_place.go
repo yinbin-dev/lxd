@@ -24,12 +24,31 @@ import (
 	"github.com/canonical/lxd/shared/osarch"
 )
 
+// instancesPostCreateInput holds the inputs of a create request that the placement and the row write of a new
+// instance share.
+type instancesPostCreateInput struct {
+	// targetProject is the project of the new instance.
+	targetProject *api.Project
+
+	// req is the create request.
+	req *api.InstancesPost
+
+	// profiles are the profiles of the new instance.
+	profiles []api.Profile
+
+	// imageRef is the alias or the fingerprint of the source image.
+	imageRef string
+
+	// remoteImage is what the image registry tells about the source image.
+	remoteImage instance.RemoteImage
+}
+
 // instancesPostPlace selects the cluster member for a new instance. It filters the members on the architectures of
 // the source, the cluster group of the target, and the cluster groups that the project permits, and then applies the
 // placement group of the instance. It also returns the name of the placement group.
-func instancesPostPlace(ctx context.Context, s *state.State, tx *db.ClusterTx, targetProject *api.Project, req api.InstancesPost, profiles []api.Profile, sourceInst *dbCluster.Instance, sourceImageRef string, remoteImage instance.RemoteImage, allMembers []db.NodeInfo, targetGroupName string) (*db.NodeInfo, string, error) {
+func instancesPostPlace(ctx context.Context, s *state.State, tx *db.ClusterTx, in instancesPostCreateInput, sourceInst *dbCluster.Instance, allMembers []db.NodeInfo, targetGroupName string) (*db.NodeInfo, string, error) {
 	// Determine which cluster members are suitable for this instance based on its image architecture.
-	architectures, err := instance.SuitableArchitectures(ctx, tx, targetProject.Name, sourceInst, sourceImageRef, req, remoteImage)
+	architectures, err := instance.SuitableArchitectures(ctx, tx, in.targetProject.Name, sourceInst, in.imageRef, *in.req, in.remoteImage)
 	if err != nil {
 		return nil, "", err
 	}
@@ -37,7 +56,7 @@ func instancesPostPlace(ctx context.Context, s *state.State, tx *db.ClusterTx, t
 	// If no architectures have been ascertained from the source then use the default
 	// architecture from project or global config if available.
 	if len(architectures) < 1 {
-		defaultArch := targetProject.Config["images.default_architecture"]
+		defaultArch := in.targetProject.Config["images.default_architecture"]
 		if defaultArch == "" {
 			defaultArch = s.GlobalConfig.ImagesDefaultArchitecture()
 		}
@@ -54,16 +73,16 @@ func instancesPostPlace(ctx context.Context, s *state.State, tx *db.ClusterTx, t
 		}
 	}
 
-	clusterGroupsAllowed := limits.GetRestrictedClusterGroups(targetProject)
+	clusterGroupsAllowed := limits.GetRestrictedClusterGroups(in.targetProject)
 
 	candidateMembers, err := tx.GetCandidateMembers(ctx, allMembers, architectures, targetGroupName, clusterGroupsAllowed, s.GlobalConfig.OfflineThreshold())
 	if err != nil {
 		return nil, "", err
 	}
 
-	expandedConfig := instancetype.ExpandInstanceConfig(s.GlobalConfig.Dump(), req.Config, profiles)
+	expandedConfig := instancetype.ExpandInstanceConfig(s.GlobalConfig.Dump(), in.req.Config, in.profiles)
 	placementGroupName := expandedConfig["placement.group"]
-	targetMemberInfo, err := instancesPostSelectClusterMember(ctx, tx, placementGroupName, candidateMembers, targetProject.Name)
+	targetMemberInfo, err := instancesPostSelectClusterMember(ctx, tx, placementGroupName, candidateMembers, in.targetProject.Name)
 	if err != nil {
 		return nil, "", err
 	}
@@ -172,8 +191,8 @@ func selectRegistryImage(ctx context.Context, tx *db.ClusterTx, source api.Insta
 // transaction, and returns the internal create request that completes the row on that member. A nil target is this
 // member. With imageUnauthorized, the row gets no metadata of the source image, because the caller authorizes the
 // image after the transaction.
-func instancesPostCreateRecord(ctx context.Context, s *state.State, tx *db.ClusterTx, targetProject *api.Project, req *api.InstancesPost, profiles []api.Profile, sourceImage *api.Image, sourceImageRef string, imageUnauthorized bool, remoteImage instance.RemoteImage, target *db.NodeInfo, clusterGroup string) (internalInstanceCreatePost, error) {
-	dbType, err := instancetype.New(string(req.Type))
+func instancesPostCreateRecord(ctx context.Context, s *state.State, tx *db.ClusterTx, in instancesPostCreateInput, sourceImage *api.Image, imageUnauthorized bool, target *db.NodeInfo, clusterGroup string) (internalInstanceCreatePost, error) {
+	dbType, err := instancetype.New(string(in.req.Type))
 	if err != nil {
 		return internalInstanceCreatePost{}, api.StatusErrorf(http.StatusBadRequest, "%w", err)
 	}
@@ -191,14 +210,14 @@ func instancesPostCreateRecord(ctx context.Context, s *state.State, tx *db.Clust
 	}
 
 	args := db.InstanceArgs{
-		Project:     targetProject.Name,
-		Config:      maps.Clone(req.Config),
+		Project:     in.targetProject.Name,
+		Config:      maps.Clone(in.req.Config),
 		Type:        dbType,
-		Description: req.Description,
-		Devices:     deviceConfig.ApplyDeviceInitialValues(deviceConfig.NewDevices(req.Devices), profiles),
-		Ephemeral:   req.Ephemeral,
-		Name:        req.Name,
-		Profiles:    profiles,
+		Description: in.req.Description,
+		Devices:     deviceConfig.ApplyDeviceInitialValues(deviceConfig.NewDevices(in.req.Devices), in.profiles),
+		Ephemeral:   in.req.Ephemeral,
+		Name:        in.req.Name,
+		Profiles:    in.profiles,
 	}
 
 	if args.Config == nil {
@@ -210,35 +229,35 @@ func instancesPostCreateRecord(ctx context.Context, s *state.State, tx *db.Clust
 	}
 
 	createReq := internalInstanceCreatePost{
-		Project:  targetProject.Name,
-		Name:     req.Name,
-		Source:   req.Source,
-		ImageRef: sourceImageRef,
-		Start:    req.Start,
+		Project:  in.targetProject.Name,
+		Name:     in.req.Name,
+		Source:   in.req.Source,
+		ImageRef: in.imageRef,
+		Start:    in.req.Start,
 	}
 
 	// The architecture of the instance: the image that the member runs, or the member itself.
 	args.Architecture = memberArch
-	if req.Source.Type == api.SourceTypeNone && req.Architecture != "" {
-		args.Architecture, err = osarch.ArchitectureId(req.Architecture)
+	if in.req.Source.Type == api.SourceTypeNone && in.req.Architecture != "" {
+		args.Architecture, err = osarch.ArchitectureId(in.req.Architecture)
 		if err != nil {
 			return internalInstanceCreatePost{}, api.StatusErrorf(http.StatusBadRequest, "%w", err)
 		}
 	}
 
-	if req.Source.Type == api.SourceTypeImage {
+	if in.req.Source.Type == api.SourceTypeImage {
 		var img *api.Image
-		if req.Source.ImageRegistry != "" {
+		if in.req.Source.ImageRegistry != "" {
 			// Pin the registry image that placement selected the member for, unless the member uses a cached copy.
 			autoUpdate := s.GlobalConfig.ImagesAutoUpdateIntervalHours() > 0
-			fingerprint, arch, err := selectRegistryImage(ctx, tx, req.Source, sourceImageRef, dbType, remoteImage, memberArch, autoUpdate)
+			fingerprint, arch, err := selectRegistryImage(ctx, tx, in.req.Source, in.imageRef, dbType, in.remoteImage, memberArch, autoUpdate)
 			if err != nil {
 				return internalInstanceCreatePost{}, err
 			}
 
 			args.Architecture = arch
 			createReq.Fingerprint = fingerprint
-			img = remoteImage.Images[arch]
+			img = in.remoteImage.Images[arch]
 		} else {
 			if sourceImage == nil {
 				return internalInstanceCreatePost{}, api.StatusErrorf(http.StatusBadRequest, "Image not provided for instance creation")

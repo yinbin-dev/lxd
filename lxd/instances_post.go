@@ -63,7 +63,7 @@ func ensureDownloadedImageFitWithinBudget(ctx context.Context, s *state.State, o
 
 	var budget int64
 	err = s.DB.Cluster.Transaction(s.ShutdownCtx, func(ctx context.Context, tx *db.ClusterTx) error {
-		budget, err = limits.GetImageSpaceBudget(ctx, s.GlobalConfig, tx, p.Name)
+		budget, err = limits.GetImageSpaceBudget(ctx, s.GlobalConfig, tx, p.Name, "")
 		return err
 	})
 	if err != nil {

@@ -460,3 +460,75 @@ func TestAllowVolumeMove_CrossProjectDoesNotCancelTargetVolume(t *testing.T) {
 	err = limits.AllowVolumeMove(ctx, nil, tx, "src-proj", "pool1", "vol", "dst-proj", "pool1", req)
 	assert.EqualError(t, err, `Failed checking if volume move allowed: Reached maximum aggregate value "100MiB" for "limits.disk" in project "dst-proj"`)
 }
+
+// GetImageSpaceBudget does not count the instance that excludeInstance names.
+func TestGetImageSpaceBudget_ExcludeInstance(t *testing.T) {
+	tests := []struct {
+		name            string
+		excludeInstance string
+		want            int64
+	}{
+		{
+			name:            "No excluded instance",
+			excludeInstance: "",
+			want:            0,
+		},
+		{
+			name:            "Excluded instance",
+			excludeInstance: "c1",
+			want:            10 * 1024 * 1024,
+		},
+		{
+			name:            "Excluded instance that does not exist",
+			excludeInstance: "c2",
+			want:            0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx, cleanup := db.NewTestClusterTx(t)
+			defer cleanup()
+
+			ctx := context.Background()
+			id, err := cluster.CreateProject(ctx, tx.Tx(), cluster.Project{Name: "p1"})
+			require.NoError(t, err)
+
+			err = cluster.CreateProjectConfig(ctx, tx.Tx(), id, map[string]string{
+				"features.images": "true",
+				"limits.disk":     "10MiB",
+			})
+			require.NoError(t, err)
+
+			_, err = tx.CreateStoragePool(ctx, "pool1", "", "dir", nil)
+			require.NoError(t, err)
+
+			// The root disk of c1 uses all of limits.disk.
+			instanceID, err := cluster.CreateInstance(ctx, tx.Tx(), cluster.Instance{
+				Project:      "p1",
+				Name:         "c1",
+				Type:         instancetype.Container,
+				Architecture: 1,
+				Node:         "none",
+			})
+			require.NoError(t, err)
+
+			devices, err := cluster.APIToDevices(map[string]map[string]string{
+				"root": {
+					"type": "disk",
+					"path": "/",
+					"pool": "pool1",
+					"size": "10MiB",
+				},
+			})
+			require.NoError(t, err)
+
+			err = cluster.CreateInstanceDevices(ctx, tx.Tx(), instanceID, devices)
+			require.NoError(t, err)
+
+			budget, err := limits.GetImageSpaceBudget(ctx, nil, tx, "p1", tt.excludeInstance)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, budget)
+		})
+	}
+}

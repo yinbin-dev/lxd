@@ -51,8 +51,8 @@ import (
 
 // ensureDownloadedImageFitWithinBudget downloads the registry image of source into the image project of p, within
 // the image budget of p. A non-empty fingerprint pins the image that the caller resolved, and image is its metadata
-// when the caller read it.
-func ensureDownloadedImageFitWithinBudget(ctx context.Context, s *state.State, op *operations.Operation, p api.Project, imgAlias string, source api.InstanceSource, imgType string, fingerprint string, image *api.Image) (*api.Image, error) {
+// when the caller read it. A non-empty excludeInstance names the instance of p that the budget does not count.
+func ensureDownloadedImageFitWithinBudget(ctx context.Context, s *state.State, op *operations.Operation, p api.Project, imgAlias string, source api.InstanceSource, imgType string, fingerprint string, image *api.Image, excludeInstance string) (*api.Image, error) {
 	var autoUpdate bool
 	var err error
 	if p.Config["images.auto_update_cached"] != "" {
@@ -63,7 +63,7 @@ func ensureDownloadedImageFitWithinBudget(ctx context.Context, s *state.State, o
 
 	var budget int64
 	err = s.DB.Cluster.Transaction(s.ShutdownCtx, func(ctx context.Context, tx *db.ClusterTx) error {
-		budget, err = limits.GetImageSpaceBudget(ctx, s.GlobalConfig, tx, p.Name, "")
+		budget, err = limits.GetImageSpaceBudget(ctx, s.GlobalConfig, tx, p.Name, excludeInstance)
 		return err
 	})
 	if err != nil {
@@ -125,7 +125,7 @@ func createFromImage(r *http.Request, s *state.State, p api.Project, profiles []
 		}
 
 		if req.Source.ImageRegistry != "" {
-			img, err = ensureDownloadedImageFitWithinBudget(ctx, s, op, p, imgAlias, req.Source, string(req.Type), "", nil)
+			img, err = ensureDownloadedImageFitWithinBudget(ctx, s, op, p, imgAlias, req.Source, string(req.Type), "", nil, "")
 			if err != nil {
 				return err
 			}

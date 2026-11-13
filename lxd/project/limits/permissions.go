@@ -361,10 +361,11 @@ func AllowVolumeMove(ctx context.Context, globalConfig *clusterConfig.Config, tx
 }
 
 // GetImageSpaceBudget returns how much disk space is left in the given project
-// for writing images.
+// for writing images. A non-empty excludeInstance names an instance of the
+// project that the budget does not count.
 //
 // If no limit is in place, return -1.
-func GetImageSpaceBudget(ctx context.Context, globalConfig *clusterConfig.Config, tx *db.ClusterTx, projectName string) (int64, error) {
+func GetImageSpaceBudget(ctx context.Context, globalConfig *clusterConfig.Config, tx *db.ClusterTx, projectName string, excludeInstance string) (int64, error) {
 	var globalConfigDump map[string]string
 	if globalConfig != nil {
 		globalConfigDump = globalConfig.Dump()
@@ -393,6 +394,12 @@ func GetImageSpaceBudget(ctx context.Context, globalConfig *clusterConfig.Config
 	quota, err := parser(info.Project.Config["limits.disk"])
 	if err != nil {
 		return -1, err
+	}
+
+	if excludeInstance != "" {
+		info.Instances = slices.DeleteFunc(info.Instances, func(inst api.Instance) bool {
+			return inst.Name == excludeInstance
+		})
 	}
 
 	instances, err := expandInstancesConfigAndDevices(globalConfigDump, info.Instances, info.Profiles)

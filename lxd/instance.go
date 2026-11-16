@@ -729,18 +729,28 @@ func resolveSourceImageFromCache(r *http.Request, s *state.State, tx *db.Cluster
 	// so that the caller can check access when the transaction has ended.
 	var authCheckFunc func(ctx context.Context) error
 	if sourceImage != nil && localLookupProject != targetProjectName && !sourceImage.Public {
-		// Get the effective image project based on the "features.images" value.
-		effectiveImageProject, err := project.ImageProject(r.Context(), tx.Tx(), localLookupProject)
+		imageURL, err := sourceImageURL(r.Context(), tx, localLookupProject, sourceImage.Fingerprint)
 		if err != nil {
 			return nil, nil, err
 		}
 
 		authCheckFunc = func(ctx context.Context) error {
-			return s.Authorizer.CheckPermission(ctx, entity.ImageURL(effectiveImageProject, sourceImage.Fingerprint), auth.EntitlementCanView)
+			return s.Authorizer.CheckPermission(ctx, imageURL, auth.EntitlementCanView)
 		}
 	}
 
 	return sourceImage, authCheckFunc, nil
+}
+
+// sourceImageURL returns the entity URL of the image with fingerprint that an instance source in sourceProject uses.
+func sourceImageURL(ctx context.Context, tx *db.ClusterTx, sourceProject string, fingerprint string) (*api.URL, error) {
+	// Get the effective image project based on the "features.images" value.
+	effectiveImageProject, err := project.ImageProject(ctx, tx.Tx(), sourceProject)
+	if err != nil {
+		return nil, err
+	}
+
+	return entity.ImageURL(effectiveImageProject, fingerprint), nil
 }
 
 // getSourceImageFromInstanceSource returns the image to use for an instance source.

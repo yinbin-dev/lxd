@@ -1580,6 +1580,43 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 	receiverCreates := !clusterNotification && (req.Source.Type == api.SourceTypeImage || req.Source.Type == api.SourceTypeNone)
 	var createReq internalInstanceCreatePost
 
+	// Authorize a private image of a different project before the placement transaction, so that the instance row
+	// holds no data of an image that the caller cannot view. The placement transaction checks that it resolves the
+	// same image.
+	var authorizedImageURL string
+	if receiverCreates && req.Source.Type == api.SourceTypeImage && req.Source.ImageRegistry == "" && req.Source.Project != "" && req.Source.Project != targetProjectName {
+		var imageURL string
+		var checker func(ctx context.Context) error
+		err = s.DB.Cluster.Transaction(r.Context(), func(ctx context.Context, tx *db.ClusterTx) error {
+			var imageRef string
+			var img *api.Image
+			img, checker, err = resolveSourceImageFromCache(r, s, tx, targetProjectName, req.Source, &imageRef, string(req.Type))
+			if err != nil || checker == nil {
+				return err
+			}
+
+			imgURL, err := sourceImageURL(ctx, tx, req.Source.Project, img.Fingerprint)
+			if err != nil {
+				return err
+			}
+
+			imageURL = imgURL.String()
+			return nil
+		})
+		if err != nil {
+			return response.SmartError(err)
+		}
+
+		if checker != nil {
+			err = checker(r.Context())
+			if err != nil {
+				return response.SmartError(err)
+			}
+
+			authorizedImageURL = imageURL
+		}
+	}
+
 	target := request.QueryParam(r, "target")
 
 	// Run a first transaction to figure out details about the source and target.
@@ -1700,6 +1737,20 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 			sourceImage, imageAuthorizationChecker, err = resolveSourceImageFromCache(r, s, tx, targetProject.Name, req.Source, &sourceImageRef, string(req.Type))
 			if err != nil {
 				return err
+			}
+
+			// The instance row can use only the image that the caller authorized before the transaction.
+			if receiverCreates && imageAuthorizationChecker != nil {
+				imgURL, err := sourceImageURL(ctx, tx, req.Source.Project, sourceImage.Fingerprint)
+				if err != nil {
+					return err
+				}
+
+				if imgURL.String() != authorizedImageURL {
+					return api.StatusErrorf(http.StatusConflict, "The source image changed during the request")
+				}
+
+				imageAuthorizationChecker = nil
 			}
 
 			// If type wasn't specified, match the image type where appropriate.
@@ -1870,10 +1921,6 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 	if imageAuthorizationChecker != nil {
 		err = imageAuthorizationChecker(r.Context())
 		if err != nil {
-			if receiverCreates {
-				instancesPostDeleteRecord(s, createReq)
-			}
-
 			return response.SmartError(err)
 		}
 	}

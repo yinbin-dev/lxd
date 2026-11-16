@@ -1904,7 +1904,7 @@ func instancesPost(d *Daemon, r *http.Request) response.Response {
 				clusterGroup = targetGroupName
 			}
 
-			createReq, err = instancesPostCreateRecord(ctx, s, tx, createInput, sourceImage, imageAuthorizationChecker != nil, targetMemberInfo, clusterGroup)
+			createReq, err = instancesPostCreateRecord(ctx, s, tx, createInput, sourceImage, targetMemberInfo, clusterGroup)
 			if err != nil {
 				return err
 			}

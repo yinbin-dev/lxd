@@ -189,9 +189,8 @@ func selectRegistryImage(ctx context.Context, tx *db.ClusterTx, source api.Insta
 
 // instancesPostCreateRecord writes the instance row of an image or a none source for member target in the caller's
 // transaction, and returns the internal create request that completes the row on that member. A nil target is this
-// member. With imageUnauthorized, the row gets no metadata of the source image, because the caller authorizes the
-// image after the transaction.
-func instancesPostCreateRecord(ctx context.Context, s *state.State, tx *db.ClusterTx, in instancesPostCreateInput, sourceImage *api.Image, imageUnauthorized bool, target *db.NodeInfo, clusterGroup string) (internalInstanceCreatePost, error) {
+// member.
+func instancesPostCreateRecord(ctx context.Context, s *state.State, tx *db.ClusterTx, in instancesPostCreateInput, sourceImage *api.Image, target *db.NodeInfo, clusterGroup string) (internalInstanceCreatePost, error) {
 	dbType, err := instancetype.New(string(in.req.Type))
 	if err != nil {
 		return internalInstanceCreatePost{}, api.StatusErrorf(http.StatusBadRequest, "%w", err)
@@ -267,10 +266,10 @@ func instancesPostCreateRecord(ctx context.Context, s *state.State, tx *db.Clust
 			createReq.Fingerprint = sourceImage.Fingerprint
 		}
 
-		// Write the image.* keys and the base image when the metadata of the image is known here and the caller
-		// can see it. Otherwise, the target writes them after the download or the authorization.
+		// Write the image.* keys and the base image when the metadata of the image is known here. Otherwise, the
+		// target writes them after the download.
 		createReq.Image = img
-		if img != nil && !imageUnauthorized {
+		if img != nil {
 			args.Architecture, err = osarch.ArchitectureId(img.Architecture)
 			if err != nil {
 				return internalInstanceCreatePost{}, err

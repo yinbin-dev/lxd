@@ -34,3 +34,4 @@ Depending on complexity, large changes should be split into smaller, logical com
 - If the commit fixes an advisory, add the sentence "Fixes advisory: <advisory-link>" as the first paragraph of the commit message body.
   - If the commit fixes a sub-issue in the advisory, use the sentence "Fixes issue #<x> of advisory: <advisory-link>"
   - A commit that contains tests for the advisory fix should also carry the "Fixes advisory" paragraph.
+  - A commit that does pure refactoring or test of the pure refactoring should not carry the "Fixes advisory" paragraph.

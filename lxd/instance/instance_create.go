@@ -160,7 +160,7 @@ func createRecord(ctx context.Context, tx *db.ClusterTx, args db.InstanceArgs, n
 		snapshotName := parts[1]
 		instance, err := cluster.GetInstance(ctx, tx.Tx(), args.Project, instanceName)
 		if err != nil {
-			return db.InstanceArgs{}, fmt.Errorf("Get instance %q in project %q", instanceName, args.Project)
+			return db.InstanceArgs{}, fmt.Errorf("Failed getting instance %q in project %q: %w", instanceName, args.Project, err)
 		}
 
 		snapshot := cluster.InstanceSnapshot{
@@ -246,7 +246,7 @@ func createRecord(ctx context.Context, tx *db.ClusterTx, args db.InstanceArgs, n
 		dbInst = *dbRow
 
 		if dbInst.ID < 1 {
-			return db.InstanceArgs{}, fmt.Errorf("Unexpected instance database ID %d: %w", dbInst.ID, err)
+			return db.InstanceArgs{}, fmt.Errorf("Unexpected instance database ID %d", dbInst.ID)
 		}
 	}
 

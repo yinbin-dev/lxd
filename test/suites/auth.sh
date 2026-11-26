@@ -913,6 +913,32 @@ fine_grained_authorization() {
   lxc auth group permission remove test-group project default can_view
   lxc delete copy-target-snap copy-target copy-source
 
+  sub_test "Instance creation from a private image of a different project requires image visibility"
+  lxc project create image-source
+  lxc image copy testimage local: --project default --target-project image-source
+  image_fingerprint="$(lxc image info testimage --project default | awk '/^Fingerprint:/ {print $2}')"
+
+  lxc auth group permission add test-group project default can_view
+  lxc auth group permission add test-group project default can_create_instances
+  lxc auth group permission add test-group project image-source can_view
+
+  # Without can_view on the image, the create fails before the instance row is written.
+  ! lxc_remote query --wait -X POST "${remote}:/1.0/instances?project=default" -d '{"name":"image-target","source":{"type":"image","fingerprint":"'"${image_fingerprint}"'","project":"image-source"}}' || false
+  [ "$(lxc list -f csv -c n image-target)" = "" ]
+
+  lxc auth group permission add test-group image "${image_fingerprint}" can_view project=image-source
+
+  lxc_remote query --wait -X POST "${remote}:/1.0/instances?project=default" -d '{"name":"image-target","source":{"type":"image","fingerprint":"'"${image_fingerprint}"'","project":"image-source"}}'
+  [ "$(lxc config get image-target volatile.base_image)" = "${image_fingerprint}" ]
+
+  lxc auth group permission remove test-group image "${image_fingerprint}" can_view project=image-source
+  lxc auth group permission remove test-group project image-source can_view
+  lxc auth group permission remove test-group project default can_create_instances
+  lxc auth group permission remove test-group project default can_view
+  lxc delete image-target
+  lxc image delete "${image_fingerprint}" --project image-source
+  lxc project delete image-source
+
   sub_test "Storage volume copy requires source visibility"
   pool_name="$(lxc storage list -f csv | cut -d, -f1)"
   lxc storage volume create "${pool_name}" copy-source-vol
